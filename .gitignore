@@ -1,0 +1,47 @@
+# 凭据：绝不入库
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+credentials*.json
+secrets*.json
+
+# 本地 agent / 编辑器元数据
+.claude/
+.codex/
+.agents/
+.hako/
+.agent/
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+build/
+dist/
+
+# 评测与临时产物
+evals/_work/
+tmp/
+temp/
+
+# 视频与提交包不进入公开代码仓库
+*.mp4
+*.zip
+
+# OS
+.DS_Store
+Thumbs.db
