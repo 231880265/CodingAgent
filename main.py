@@ -17,6 +17,7 @@ from hako.config import Config
 from hako.events import EventBus
 from hako.llm import LLMClient
 from hako.loop import Agent
+from hako.subagent import make_delegate_readonly
 from hako.tools import build_default_registry
 from hako.ui import Renderer, make_approval_fn, setup_console
 
@@ -28,11 +29,24 @@ def build_agent(args: argparse.Namespace, console: Console) -> Agent:
 
     bus = EventBus()
     bus.subscribe(Renderer(console, verbose=args.verbose).handle)
+    extra_tools = (
+        [make_delegate_readonly(config, bus)] if config.enable_subagent else []
+    )
 
     return Agent(
         config=config,
-        registry=build_default_registry(config.workspace, config.tool_result_budget),
-        client=LLMClient(config.api_key, config.base_url, config.model),
+        registry=build_default_registry(
+            config.workspace,
+            config.tool_result_budget,
+            extra_tools=extra_tools,
+        ),
+        client=LLMClient(
+            config.api_key,
+            config.base_url,
+            config.model,
+            max_output_tokens=config.max_output_tokens,
+            enable_thinking=config.enable_thinking,
+        ),
         bus=bus,
         approve=make_approval_fn(console, auto_approve=args.yes),
     )
@@ -72,7 +86,12 @@ def main() -> int:
     parser.add_argument("task", nargs="?", help="要完成的任务；留空进入交互模式")
     parser.add_argument("-C", "--workspace", default=".", help="工作目录，默认当前目录")
     parser.add_argument("-v", "--verbose", action="store_true", help="展开工具结果与上下文占用")
-    parser.add_argument("-y", "--yes", action="store_true", help="自动批准所有写入与命令执行")
+    parser.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="自动批准普通写入与命令；高风险命令仍需逐次确认",
+    )
     parser.add_argument("--max-steps", type=int, help="覆盖步数上限")
     args = parser.parse_args()
 

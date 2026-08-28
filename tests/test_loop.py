@@ -1,7 +1,7 @@
 """主循环与终止条件。
 
-这里测的是"什么时候停、为什么停"。五种终止原因各自对应一种真实失败模式，
-所以每种都单独验一遍，而不是笼统测个"能跑完"。
+这里测的是"什么时候停、为什么停"。正常完成、未验证完成和各类失败原因
+分别验证，而不是笼统测一个"能跑完"。
 """
 
 from __future__ import annotations
@@ -10,14 +10,40 @@ from pathlib import Path
 
 import pytest
 
-from hako.events import EventBus, ToolCallFinished
-from hako.loop import STUCK_THRESHOLD, Agent, StopReason
+from hako.events import (
+    ContinuationRequired,
+    EventBus,
+    ToolCallFinished,
+    VerificationRequired,
+)
+from hako.loop import MAX_CONTINUATION_NUDGES, STUCK_THRESHOLD, Agent, StopReason
+from hako.tools import ToolResult
 from tests.fake_llm import ExplodingClient, FakeClient, call, reply
 
 
 def agent_with(script, config, registry, bus, approve=None) -> tuple[Agent, FakeClient]:
     client = FakeClient(script)
-    return Agent(config, registry, client, bus, approve=approve), client
+    policy = approve if approve is not None else (lambda tool, args: True)
+    return Agent(config, registry, client, bus, approve=policy), client
+
+
+def fake_verifier(registry, outcomes: list[bool], kind: str = "test") -> None:
+    """把真实 shell 替换成带结构化证据的快速验证器。"""
+    tool = registry.get("run_command")
+    assert tool is not None
+    remaining = list(outcomes)
+
+    def handler(command: str, timeout: int = 60) -> ToolResult:
+        ok = remaining.pop(0)
+        return ToolResult(
+            ok=ok,
+            detail=f"exit={0 if ok else 1}\n{'2 passed' if ok else '1 failed'}",
+            summary=f"{command}  exit={0 if ok else 1}",
+            verification_kind=kind,
+            verification_command=command,
+        )
+
+    tool.handler = handler
 
 
 # ------------------------------------------------------------------ DONE
@@ -27,7 +53,7 @@ def test_no_tool_calls_means_done(config, registry, bus):
     agent, client = agent_with([reply("已完成")], config, registry, bus)
     result = agent.run("任务")
 
-    assert result.reason is StopReason.DONE
+    assert result.reason is StopReason.DONE_READ_ONLY
     assert result.ok
     assert result.steps == 1
     assert result.final_text == "已完成"
@@ -44,7 +70,8 @@ def test_tool_then_finish(config, registry, bus, workspace: Path):
     )
     result = agent.run("看看 a.py")
 
-    assert result.reason is StopReason.DONE
+    assert result.reason is StopReason.DONE_READ_ONLY
+    assert result.ok
     assert result.steps == 2
     # 第二次请求里必须带上工具结果，否则模型等于没读
     assert any("x = 1" in str(m.get("content")) for m in client.seen[1])
@@ -59,6 +86,215 @@ def test_usage_accumulates_from_api_not_estimate(config, registry, bus):
         config, registry, bus,
     )
     assert agent.run("t").total_tokens == 500 + 30 + 700 + 10
+
+
+def test_truncated_no_tool_reply_is_nudged_then_can_act(
+    config, registry, bus, workspace: Path
+):
+    continued: list[ContinuationRequired] = []
+    bus.subscribe(
+        lambda event: continued.append(event)
+        if isinstance(event, ContinuationRequired)
+        else None
+    )
+    fake_verifier(registry, [True])
+    agent, client = agent_with(
+        [
+            reply(
+                "我先长篇分析但还没开始修改……",
+                finish_reason="length",
+                completion_tokens=config.max_output_tokens,
+            ),
+            reply(
+                "",
+                [call("write_file", {"path": "a.py", "content": "x = 1\n"})],
+            ),
+            reply("", [call("run_command", {"command": "pytest -q"})]),
+            reply("已修改并验证"),
+        ],
+        config,
+        registry,
+        bus,
+    )
+
+    result = agent.run("创建并测试 a.py")
+
+    assert result.reason is StopReason.DONE_VERIFIED
+    assert (workspace / "a.py").exists()
+    assert len(continued) == 1
+    assert "请立即调用" in str(client.seen[1])
+
+
+def test_repeated_truncated_replies_never_count_as_read_only_done(
+    config, registry, bus
+):
+    agent, _ = agent_with(
+        [
+            reply("仍在分析", finish_reason="length")
+            for _ in range(MAX_CONTINUATION_NUDGES + 1)
+        ],
+        config,
+        registry,
+        bus,
+    )
+
+    result = agent.run("修复问题")
+
+    assert result.reason is StopReason.INCOMPLETE
+    assert not result.ok
+    assert result.steps == MAX_CONTINUATION_NUDGES + 1
+
+
+# ------------------------------------------------------- VERIFIED FINISH
+
+
+def test_write_without_verification_is_nudged_then_unverified(
+    config, registry, bus, workspace: Path
+):
+    required: list[VerificationRequired] = []
+    bus.subscribe(
+        lambda event: required.append(event)
+        if isinstance(event, VerificationRequired)
+        else None
+    )
+    agent, client = agent_with(
+        [
+            reply("", [call("write_file", {"path": "a.py", "content": "x = 1\n"})]),
+            reply("已经改完"),
+            reply("当前无法验证"),
+        ],
+        config,
+        registry,
+        bus,
+    )
+
+    result = agent.run("创建 a.py")
+
+    assert result.reason is StopReason.DONE_UNVERIFIED
+    assert not result.ok
+    assert result.changed_paths == ("a.py",)
+    assert result.verification == ()
+    assert len(required) == 1
+    assert "最后一次文件修改后" in str(client.seen[2])
+
+
+def test_successful_check_after_last_write_is_verified(
+    config, registry, bus, workspace: Path
+):
+    fake_verifier(registry, [True])
+    agent, _ = agent_with(
+        [
+            reply("", [call("write_file", {"path": "a.py", "content": "x = 1\n"})]),
+            reply("", [call("run_command", {"command": "pytest -q"})]),
+            reply("修复完成，测试通过"),
+        ],
+        config,
+        registry,
+        bus,
+    )
+
+    result = agent.run("创建并测试")
+
+    assert result.reason is StopReason.DONE_VERIFIED
+    assert result.ok
+    assert result.changed_paths == ("a.py",)
+    assert len(result.verification) == 1
+    assert result.verification[0].kind == "test"
+    assert result.verification[0].command == "pytest -q"
+    assert result.verification[0].step == 2
+
+
+def test_failed_check_does_not_verify(config, registry, bus):
+    fake_verifier(registry, [False])
+    agent, _ = agent_with(
+        [
+            reply("", [call("write_file", {"path": "a.py", "content": "bad\n"})]),
+            reply("", [call("run_command", {"command": "pytest -q"})]),
+            reply("我先结束"),
+            reply("无法继续"),
+        ],
+        config,
+        registry,
+        bus,
+    )
+    result = agent.run("t")
+    assert result.reason is StopReason.DONE_UNVERIFIED
+    assert result.verification == ()
+
+
+def test_verification_before_write_does_not_count(config, registry, bus):
+    fake_verifier(registry, [True])
+    agent, _ = agent_with(
+        [
+            reply("", [call("run_command", {"command": "pytest -q"})]),
+            reply("", [call("write_file", {"path": "a.py", "content": "new\n"})]),
+            reply("完成"),
+            reply("没有后续验证"),
+        ],
+        config,
+        registry,
+        bus,
+    )
+    result = agent.run("t")
+    assert result.reason is StopReason.DONE_UNVERIFIED
+    assert result.verification == ()
+
+
+def test_later_write_invalidates_successful_verification(config, registry, bus):
+    fake_verifier(registry, [True])
+    agent, _ = agent_with(
+        [
+            reply("", [call("write_file", {"path": "a.py", "content": "v1\n"})]),
+            reply("", [call("run_command", {"command": "pytest -q"})]),
+            reply("", [call("write_file", {"path": "a.py", "content": "v2\n"})]),
+            reply("完成"),
+            reply("没有再测"),
+        ],
+        config,
+        registry,
+        bus,
+    )
+    result = agent.run("t")
+    assert result.reason is StopReason.DONE_UNVERIFIED
+    assert result.verification == ()
+
+
+def test_later_failed_check_clears_earlier_success(config, registry, bus):
+    fake_verifier(registry, [True, False])
+    agent, _ = agent_with(
+        [
+            reply("", [call("write_file", {"path": "a.py", "content": "v1\n"})]),
+            reply("", [call("run_command", {"command": "pytest -q"})]),
+            reply("", [call("run_command", {"command": "ruff check ."})]),
+            reply("结束"),
+            reply("检查仍失败"),
+        ],
+        config,
+        registry,
+        bus,
+    )
+    result = agent.run("t")
+    assert result.reason is StopReason.DONE_UNVERIFIED
+    assert result.verification == ()
+
+
+def test_verification_state_resets_between_interactive_tasks(config, registry, bus):
+    fake_verifier(registry, [True])
+    agent, _ = agent_with(
+        [
+            reply("", [call("write_file", {"path": "a.py", "content": "v1\n"})]),
+            reply("", [call("run_command", {"command": "pytest -q"})]),
+            reply("第一个任务完成"),
+            reply("第二个任务只做说明"),
+        ],
+        config,
+        registry,
+        bus,
+    )
+    first = agent.run("任务一")
+    second = agent.run("任务二")
+    assert first.reason is StopReason.DONE_VERIFIED
+    assert second.reason is StopReason.DONE_READ_ONLY
 
 
 # ------------------------------------------------------------------ MAX_STEPS
@@ -146,6 +382,20 @@ def test_user_denial_terminates_without_executing(config, registry, bus, workspa
         config, registry, bus,
         approve=lambda tool, args: False,
     )
+    result = agent.run("写个文件")
+
+    assert result.reason is StopReason.DENIED
+    assert not (workspace / "x.py").exists()
+
+
+def test_library_default_denies_tools_that_need_approval(
+    config, registry, bus, workspace: Path
+):
+    client = FakeClient(
+        [reply("", [call("write_file", {"path": "x.py", "content": "boom"})])]
+    )
+    agent = Agent(config, registry, client, bus)
+
     result = agent.run("写个文件")
 
     assert result.reason is StopReason.DENIED
@@ -291,12 +541,53 @@ def test_write_invalidates_read_in_next_request(config, registry, bus, workspace
     )
     result = agent.run("重命名函数")
 
-    assert result.reason is StopReason.DONE
+    assert result.reason is StopReason.DONE_UNVERIFIED
+    assert not result.ok
     first_request, last_request = client.seen[0], client.seen[-1]
     assert not any("old_name" in str(m.get("content")) for m in last_request), \
         "写操作后旧读取内容仍在上下文里，失效机制没生效"
     assert any("已被修改" in str(m.get("content")) for m in last_request)
     assert len(last_request) > len(first_request)
+
+
+def test_edit_invalidates_old_read_and_can_finish_verified(
+    config, registry, bus, workspace: Path
+):
+    """edit_file 必须复用 write_file 的失效协议，并由后续测试关闭 DIRTY 状态。"""
+    (workspace / "a.py").write_text("value = 'old'\n", encoding="utf-8")
+    fake_verifier(registry, [True])
+    agent, client = agent_with(
+        [
+            reply("", [call("read_file", {"path": "./a.py"}, call_id="r1")]),
+            reply(
+                "",
+                [
+                    call(
+                        "edit_file",
+                        {
+                            "path": "a.py",
+                            "old_text": "value = 'old'",
+                            "new_text": "value = 'new'",
+                        },
+                        call_id="e1",
+                    )
+                ],
+            ),
+            reply("", [call("run_command", {"command": "pytest -q"}, call_id="t1")]),
+            reply("已修复并验证"),
+        ],
+        config,
+        registry,
+        bus,
+    )
+
+    result = agent.run("更新值")
+
+    assert result.reason is StopReason.DONE_VERIFIED
+    assert (workspace / "a.py").read_text(encoding="utf-8") == "value = 'new'\n"
+    request_after_edit = client.seen[2]
+    assert not any("value = 'old'" in str(m.get("content")) for m in request_after_edit)
+    assert any("已被修改" in str(m.get("content")) for m in request_after_edit)
 
 
 def test_read_after_write_is_kept(config, registry, bus, workspace: Path):

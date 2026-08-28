@@ -27,6 +27,7 @@ def reply(text: str = "", calls: list[ParsedCall] | None = None, **usage) -> Mod
         calls=calls or [],
         prompt_tokens=usage.get("prompt_tokens", 100),
         completion_tokens=usage.get("completion_tokens", 20),
+        finish_reason=usage.get("finish_reason", "stop"),
     )
 
 

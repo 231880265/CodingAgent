@@ -83,10 +83,53 @@ class ContextStats(Event):
 
 
 @dataclass(frozen=True)
+class VerificationRequired(Event):
+    """模型试图在修改后无验证结束；内核已要求它继续。"""
+
+    changed_paths: tuple[str, ...]
+    message: str
+    kind: str = field(init=False, default="verification_required")
+
+
+@dataclass(frozen=True)
+class ContinuationRequired(Event):
+    """模型输出被截断且未调用工具；内核拒绝把它当成完成。"""
+
+    attempt: int
+    max_attempts: int
+    finish_reason: str
+    message: str
+    kind: str = field(init=False, default="continuation_required")
+
+
+@dataclass(frozen=True)
+class SubagentStarted(Event):
+    """主 Agent 启动一次隔离的只读调查。"""
+
+    task: str
+    max_steps: int
+    kind: str = field(init=False, default="subagent_started")
+
+
+@dataclass(frozen=True)
+class SubagentFinished(Event):
+    """只读调查的独立成本与上下文峰值。"""
+
+    ok: bool
+    reason: str
+    steps: int
+    total_tokens: int
+    max_context_tokens: int
+    kind: str = field(init=False, default="subagent_finished")
+
+
+@dataclass(frozen=True)
 class RunFinished(Event):
     reason: str           # 见 loop.StopReason
     steps: int
     total_tokens: int
+    changed_paths: tuple[str, ...] = ()
+    verification: str = ""
     kind: str = field(init=False, default="run_finished")
 
 

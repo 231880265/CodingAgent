@@ -24,6 +24,7 @@ ICONS = {
     "run_command": "▸",
     "write_file": "◆",
     "edit_file": "◆",
+    "delegate_readonly": "↳",
 }
 # 编码不支持时的退路。字形退化好过整块输出消失（见 ui/console.py）。
 ASCII_ICONS = {
@@ -32,6 +33,7 @@ ASCII_ICONS = {
     "run_command": ">",
     "write_file": "*",
     "edit_file": "*",
+    "delegate_readonly": ">",
 }
 GLYPHS = {
     "fail": "✗", "ok": "✓", "warn": "⚠", "denied": "⊘",
@@ -120,11 +122,51 @@ class Renderer:
         self.console.print()
         self.console.print(Text(f"  {self._g['fail']} {e.message}", style="bold red"))
 
+    def _on_verification_required(self, e: ev.VerificationRequired) -> None:
+        self._stop_thinking()
+        paths = ", ".join(e.changed_paths[:3])
+        if len(e.changed_paths) > 3:
+            paths += f" 等 {len(e.changed_paths)} 个文件"
+        self.console.print(
+            Text(f"  {self._g['warn']} 修改尚未验证：{paths}", style="bold yellow")
+        )
+
+    def _on_continuation_required(self, e: ev.ContinuationRequired) -> None:
+        self._stop_thinking()
+        self.console.print(
+            Text(
+                f"  {self._g['warn']} 回复被截断，继续执行 "
+                f"({e.attempt}/{e.max_attempts})",
+                style="bold yellow",
+            )
+        )
+
+    def _on_subagent_started(self, e: ev.SubagentStarted) -> None:
+        self.console.print(
+            Text(
+                f"    {self._g['corner']} 只读 subagent 调查中（最多 {e.max_steps} 步）",
+                style="dim",
+            )
+        )
+
+    def _on_subagent_finished(self, e: ev.SubagentFinished) -> None:
+        mark = self._g["ok"] if e.ok else self._g["warn"]
+        self.console.print(
+            Text(
+                f"    {mark} 只读调查 {e.reason} · {e.steps} 步 · {e.total_tokens:,} tokens",
+                style="dim" if e.ok else "yellow",
+            )
+        )
+
     def _on_run_finished(self, e: ev.RunFinished) -> None:
         self._stop_thinking()
         g = self._g
         label = {
             "done": (f"{g['ok']} 完成", "green"),
+            "done_read_only": (f"{g['ok']} 完成（只读）", "green"),
+            "done_verified": (f"{g['ok']} 已验证完成", "green"),
+            "done_unverified": (f"{g['warn']} 修改完成但未验证", "yellow"),
+            "incomplete": (f"{g['warn']} 回复反复截断，任务未完成", "yellow"),
             "max_steps": (f"{g['warn']} 达到步数上限", "yellow"),
             "stuck": (f"{g['warn']} 检测到无进展，已终止", "yellow"),
             "denied": (f"{g['denied']} 用户已拒绝", "yellow"),
@@ -136,6 +178,8 @@ class Renderer:
             Text(f"  {label[0]}", style=f"bold {label[1]}")
             + Text(f"   {e.steps} 步 · {e.total_tokens:,} tokens", style="dim")
         )
+        if e.verification:
+            self.console.print(Text(f"  验证：{e.verification}", style="dim"))
         self.console.print()
 
     # ------------------------------------------------------------ 辅助
@@ -192,32 +236,51 @@ def _context_bar(
 def make_approval_fn(console: Console, auto_approve: bool = False):
     """生成批准回调。
 
-    默认询问而非默认放行（见 DESIGN.md #6）：写文件和执行命令是不可逆的，
-    "先问一句"的成本远低于"改错了再回滚"。
+    普通写入/命令默认询问，可由 -y 或会话记忆放行；危险命令永远先走
+    逐次确认，非交互环境直接拒绝。检查危险级别必须发生在所有快捷放行之前。
     """
     remembered: set[str] = set()
 
     def approve(tool: Tool, args: dict) -> bool:
+        danger = tool.danger_reason(args)
+        if danger:
+            if not stdin_is_tty():
+                console.print(
+                    Text(
+                        f"  非交互环境拒绝高风险 {tool.name}：{danger}",
+                        style="bold red",
+                    )
+                )
+                return False
+
+            console.print()
+            console.print(
+                Text(f"  高风险 {tool.name} 请求", style="bold red")
+            )
+            console.print(Text(f"    命中规则：{danger}", style="red"))
+            _print_approval_preview(console, tool, args)
+            choice = select(
+                console,
+                Text("  该操作不能被 -y 或会话记忆跳过，是否明确执行？", style="dim"),
+                ["明确允许这一次", "拒绝"],
+            )
+            console.print()
+            return choice == 0
+
         if auto_approve or tool.name in remembered:
             return True
         if not stdin_is_tty():
-            return True                    # 评测/管道模式：无人可问，放行
+            console.print(
+                Text(
+                    f"  非交互环境拒绝 {tool.name}；如需普通操作请显式使用 -y",
+                    style="yellow",
+                )
+            )
+            return False
 
         console.print()
         console.print(Text(f"  {tool.name} 请求执行：", style="bold yellow"))
-        preview = _format_args(tool.name, args)
-        if tool.name == "write_file":
-            console.print(
-                Syntax(
-                    str(args.get("content", ""))[:800],
-                    _guess_lexer(str(args.get("path", ""))),
-                    theme="ansi_dark",
-                    line_numbers=False,
-                    word_wrap=True,
-                )
-            )
-        else:
-            console.print(Text(f"    {preview}", style="yellow"))
+        _print_approval_preview(console, tool, args)
 
         choice = select(
             console,
@@ -230,6 +293,45 @@ def make_approval_fn(console: Console, auto_approve: bool = False):
         return choice in (0, 1)
 
     return approve
+
+
+def _print_approval_preview(console: Console, tool: Tool, args: dict) -> None:
+    preview = _format_args(tool.name, args)
+    if tool.name == "write_file":
+        console.print(
+            Syntax(
+                str(args.get("content", ""))[:800],
+                _guess_lexer(str(args.get("path", ""))),
+                theme="ansi_dark",
+                line_numbers=False,
+                word_wrap=True,
+            )
+        )
+    elif tool.name == "edit_file":
+        lexer = _guess_lexer(str(args.get("path", "")))
+        console.print(Text(f"    {preview}", style="yellow"))
+        console.print(Text("    原片段：", style="dim"))
+        console.print(
+            Syntax(
+                str(args.get("old_text", ""))[:600],
+                lexer,
+                theme="ansi_dark",
+                line_numbers=False,
+                word_wrap=True,
+            )
+        )
+        console.print(Text("    新片段：", style="dim"))
+        console.print(
+            Syntax(
+                str(args.get("new_text", ""))[:600],
+                lexer,
+                theme="ansi_dark",
+                line_numbers=False,
+                word_wrap=True,
+            )
+        )
+    else:
+        console.print(Text(f"    {preview}", style="yellow"))
 
 
 def _guess_lexer(path: str) -> str:

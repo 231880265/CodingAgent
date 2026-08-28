@@ -32,6 +32,9 @@ class ModelReply:
     calls: list[ParsedCall]
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    # stop / tool_calls / length 等。主循环必须知道是否因输出上限截断；
+    # “没有 tool_calls”本身不等于模型已经完成任务。
+    finish_reason: str = ""
     raw_message: Any = None
 
 
@@ -82,8 +85,17 @@ def _close_braces(text: str) -> str:
 
 
 class LLMClient:
-    def __init__(self, api_key: str, base_url: str, model: str) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str,
+        model: str,
+        max_output_tokens: int = 4096,
+        enable_thinking: bool | None = None,
+    ) -> None:
         self.model = model
+        self.max_output_tokens = max(1, int(max_output_tokens))
+        self.enable_thinking = enable_thinking
         self._client = OpenAI(api_key=api_key, base_url=base_url, timeout=120.0, max_retries=0)
 
     def complete(
@@ -94,12 +106,18 @@ class LLMClient:
 
         for attempt in range(4):
             try:
+                request: dict[str, Any] = {
+                    "model": self.model,
+                    "messages": messages,
+                    "tools": tools,
+                    "temperature": 0.0,
+                    "max_tokens": self.max_output_tokens,
+                }
+                if self.enable_thinking is not None:
+                    request["extra_body"] = {"enable_thinking": self.enable_thinking}
+
                 response = self._client.chat.completions.create(
-                    model=self.model,
-                    messages=messages,
-                    tools=tools,
-                    # 编程任务要的是确定性，不是创造力
-                    temperature=0.0,
+                    **request,
                 )
                 return self._normalize(response)
             except (RateLimitError, APITimeoutError) as exc:
@@ -139,6 +157,7 @@ class LLMClient:
             calls=calls,
             prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
             completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
+            finish_reason=str(getattr(choice, "finish_reason", "") or ""),
             raw_message=message,
         )
 

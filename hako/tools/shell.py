@@ -14,10 +14,12 @@ run_command 的输入本来就是"一条要执行的命令"，防护靠权限层
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 
+from ..fs_audit import diff_snapshots, snapshot_workspace
 from ..truncate import clip_text
 from .base import Tool, ToolError, ToolResult
 
@@ -37,14 +39,113 @@ INTERACTIVE_HINTS = {
     "ssh ": "agent 环境无法处理交互式认证",
 }
 
-# 危险模式：需要用户显式批准（权限层实现，这里只负责识别）
-DANGER_PATTERNS = (
-    "rm -rf", "rm -fr", "rmdir /s", "remove-item -recurse",
-    "git push", "git reset --hard", "git clean -f",
-    "curl", "wget", "iwr", "invoke-webrequest",   # 下载 + 管道执行
-    "shutdown", "reboot", "mkfs", "dd if=",
-    "format ", "del /f", "drop table", "drop database",
+# 危险模式是保守的词法门禁，不假装自己是完整 shell AST。误报只多一次确认，
+# 漏报却可能造成不可恢复操作，因此覆盖参数顺序变化并保留明确的命中原因。
+DANGER_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "递归/强制删除",
+        re.compile(
+            r"(?i)(?:\brm(?:\.exe)?\s+-(?:[a-z]*r[a-z]*f|[a-z]*f[a-z]*r)[a-z]*\b|"
+            r"\brmdir(?:\.exe)?\s+/s\b|"
+            r"\bremove-item\b[^\r\n;&|]*(?:^|\s)-recurse\b|\bdel(?:\.exe)?\s+/f\b)"
+        ),
+    ),
+    (
+        "会改写远端或丢弃版本库状态的 Git 命令",
+        re.compile(
+            r"(?i)\bgit(?:\.exe)?\s+(?:push\b|reset\s+--hard\b|clean\s+-[a-z]*f[a-z]*\b)"
+        ),
+    ),
+    (
+        "网络下载命令",
+        re.compile(r"(?i)(?:^|[\s;&|])(?:curl|wget|iwr|invoke-webrequest)(?:\.exe)?\b"),
+    ),
+    (
+        "系统或磁盘破坏命令",
+        re.compile(
+            r"(?i)(?:\bshutdown\b|\breboot\b|\bmkfs(?:\.\w+)?\b|"
+            r"\bdd\s+[^\r\n;&|]*\bif=|\bformat(?:\.com)?\s+[a-z]:)"
+        ),
+    ),
+    (
+        "数据库破坏语句",
+        re.compile(r"(?i)\bdrop\s+(?:table|database)\b"),
+    ),
 )
+
+# Verified Finish 只接受“单一、可审计”的验证命令。含管道、命令拼接或显式
+# 吞错的命令即使最终 exit=0 也不计入，避免 `pytest || true` 伪造通过。
+_COMPOUND_COMMAND = re.compile(r"[;&|\r\n]")
+_NON_EXECUTING_CHECK = re.compile(
+    r"(?i)(?:--collect-only|(?:^|\s)--co(?:\s|$)|(?:^|\s)--help(?:\s|$)|"
+    r"(?:^|\s)-h(?:\s|$)|(?:^|\s)--version(?:\s|$)|--list-tests?)"
+)
+_VERIFICATION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "test",
+        re.compile(
+            r"(?i)^\s*(?:(?:\S*python(?:\.exe)?|py(?:\.exe)?)\s+-m\s+"
+            r"(?:pytest|unittest)|\S*pytest(?:\.exe)?|npm(?:\.cmd)?\s+"
+            r"(?:run\s+)?test|pnpm\s+(?:run\s+)?test|yarn\s+(?:run\s+)?test|"
+            r"cargo\s+test|go\s+test|dotnet\s+test|mvnw?(?:\.cmd)?\s+.*\btest|"
+            r"gradlew?(?:\.bat)?\s+.*\btest)\b"
+        ),
+    ),
+    (
+        "build",
+        re.compile(
+            r"(?i)^\s*(?:npm(?:\.cmd)?\s+run\s+build|pnpm\s+(?:run\s+)?build|"
+            r"yarn\s+(?:run\s+)?build|cargo\s+build|go\s+build|dotnet\s+build|"
+            r"mvnw?(?:\.cmd)?\s+.*\bpackage|gradlew?(?:\.bat)?\s+.*\bbuild|"
+            r"(?:\S*python(?:\.exe)?|py(?:\.exe)?)\s+-m\s+compileall)\b"
+        ),
+    ),
+    (
+        "check",
+        re.compile(
+            r"(?i)^\s*(?:\S*ruff(?:\.exe)?\s+check|\S*mypy(?:\.exe)?|"
+            r"\S*eslint(?:\.cmd)?|\S*tsc(?:\.cmd)?\s+--noemit|cargo\s+check|go\s+vet)\b"
+        ),
+    ),
+)
+
+_BARE_PYTEST = re.compile(r"(?i)^pytest(?:\.exe)?(?P<args>(?:\s+.*)?)$")
+
+
+def classify_verification(command: str) -> str | None:
+    """把可信的单一验证命令分类为 test/build/check，其他返回 None。"""
+    candidate = (command or "").strip()
+    if not candidate or _COMPOUND_COMMAND.search(candidate):
+        return None
+    if _NON_EXECUTING_CHECK.search(candidate):
+        return None
+    for kind, pattern in _VERIFICATION_PATTERNS:
+        if pattern.search(candidate):
+            return kind
+    return None
+
+
+def normalize_windows_pytest(
+    command: str,
+    *,
+    platform: str | None = None,
+    executable: str | None = None,
+) -> str:
+    """Windows 上把 bare pytest 绑定到启动 hako 的 Python。
+
+    PATH 里的 pytest.exe 可能来自系统 Python，而 hako 运行在 .venv；前者会让
+    同一仓库出现不同 sys.path，甚至诱使 Agent 写 conftest.py 修一个不存在的
+    项目问题。只改写明确的 bare `pytest[.exe]`，显式解释器命令保持原样。
+    """
+    candidate = (command or "").strip()
+    if (platform or sys.platform) != "win32":
+        return candidate
+    match = _BARE_PYTEST.fullmatch(candidate)
+    if match is None:
+        return candidate
+    python = executable or sys.executable
+    quoted = "'" + python.replace("'", "''") + "'"
+    return f"& {quoted} -m pytest{match.group('args')}"
 
 
 # PowerShell 自己的报错文本走 .NET Console，不受 PYTHONIOENCODING 管。
@@ -80,32 +181,35 @@ def looks_interactive(command: str) -> str | None:
 
 
 def is_dangerous(command: str) -> str | None:
-    """返回命中的危险模式，或 None。"""
-    low = command.lower()
-    for pattern in DANGER_PATTERNS:
-        if pattern in low:
-            return pattern
+    """返回命中的危险类别，或 None。"""
+    for reason, pattern in DANGER_PATTERNS:
+        if pattern.search(command or ""):
+            return reason
     return None
 
 
 def make_run_command(workspace: Path, budget: int = 6000) -> Tool:
     def handler(command: str, timeout: int = DEFAULT_TIMEOUT) -> ToolResult:
-        command = (command or "").strip()
-        if not command:
+        requested_command = (command or "").strip()
+        if not requested_command:
             raise ToolError("command 不能为空")
 
-        if hint := looks_interactive(command):
+        if hint := looks_interactive(requested_command):
             raise ToolError(
-                f"该命令需要交互输入，会导致 agent 卡死到超时：{command}\n建议：{hint}"
+                f"该命令需要交互输入，会导致 agent 卡死到超时：{requested_command}\n建议：{hint}"
             )
+
+        executed_command = normalize_windows_pytest(requested_command)
+        normalized = executed_command != requested_command
 
         timeout = max(1, min(int(timeout), MAX_TIMEOUT))
         # 强制 UTF-8，否则 Windows 上 cp936 会把子进程输出解码成乱码
         env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
+        before = snapshot_workspace(workspace)
 
         try:
             proc = subprocess.run(
-                shell_argv(command),
+                shell_argv(executed_command),
                 cwd=workspace,
                 capture_output=True,
                 text=True,
@@ -118,20 +222,47 @@ def make_run_command(workspace: Path, budget: int = 6000) -> Tool:
                 stdin=subprocess.DEVNULL,
             )
         except subprocess.TimeoutExpired:
-            raise ToolError(
-                f"命令超时（{timeout}s）已被终止：{command}\n"
+            effects = diff_snapshots(before, snapshot_workspace(workspace))
+            detail = (
+                f"命令超时（{timeout}s）已被终止：{requested_command}\n"
                 "若确实需要更久，重试时显式传更大的 timeout；"
                 "若这是个常驻进程（dev server 等），换成一次性命令。"
-            ) from None
+            )
+            if audit_detail := effects.detail():
+                detail = f"{detail}\n{audit_detail}"
+            verification_kind = classify_verification(requested_command)
+            return ToolResult(
+                ok=False,
+                detail=detail,
+                summary=f"{requested_command[:70]}  timeout · {effects.summary or 'files unchanged'}",
+                touched_paths=effects.touched_paths,
+                created_paths=effects.created,
+                modified_paths=effects.modified,
+                deleted_paths=effects.deleted,
+                verification_kind=verification_kind or "",
+                verification_command=(
+                    executed_command if verification_kind and normalized
+                    else requested_command if verification_kind
+                    else ""
+                ),
+            )
         except FileNotFoundError:
-            raise ToolError(f"找不到 shell 或命令不存在：{command}") from None
+            raise ToolError(f"找不到 shell 或命令不存在：{requested_command}") from None
 
+        effects = diff_snapshots(before, snapshot_workspace(workspace))
         parts = []
         if proc.stdout.strip():
             parts.append(proc.stdout.rstrip())
         if proc.stderr.strip():
             parts.append(f"--- stderr ---\n{proc.stderr.rstrip()}")
         output = "\n".join(parts) or "(无输出)"
+        if normalized:
+            output = (
+                "[hako] Windows bare pytest 已使用当前 Python 执行："
+                f"{executed_command}\n{output}"
+            )
+        if audit_detail := effects.detail():
+            output = f"{audit_detail}\n{output}"
 
         detail = clip_text(
             output, budget, hint="完整输出未保留，需要时请用更精确的命令重跑（如加 grep / --tb=short）"
@@ -139,10 +270,27 @@ def make_run_command(workspace: Path, budget: int = 6000) -> Tool:
         ok = proc.returncode == 0
         detail = f"exit={proc.returncode}\n{detail}"
 
+        verification_kind = classify_verification(requested_command)
+        summary_command = (
+            f"{requested_command} [current Python]"
+            if normalized
+            else requested_command
+        )
+        effect_summary = f" · {effects.summary}" if effects.summary else ""
         return ToolResult(
             ok=ok,
             detail=detail,
-            summary=f"{command[:60]}  exit={proc.returncode}",
+            summary=f"{summary_command[:80]}  exit={proc.returncode}{effect_summary}",
+            touched_paths=effects.touched_paths,
+            created_paths=effects.created,
+            modified_paths=effects.modified,
+            deleted_paths=effects.deleted,
+            verification_kind=verification_kind or "",
+            verification_command=(
+                executed_command if verification_kind and normalized
+                else requested_command if verification_kind
+                else ""
+            ),
         )
 
     return Tool(
@@ -151,7 +299,9 @@ def make_run_command(workspace: Path, budget: int = 6000) -> Tool:
             "在工作目录下执行 shell 命令并返回 stdout/stderr 与退出码"
             f"（Windows 为 PowerShell，其余为 sh）。默认超时 {DEFAULT_TIMEOUT} 秒。"
             "不要执行需要交互输入或常驻不退出的命令（如 dev server）。"
+            "修改文件优先使用 edit_file/write_file；shell 的净文件副作用会被审计并计入变更。"
             "验证改动请优先跑项目自带的测试命令。"
+            "Windows 上 bare pytest 会自动改为当前 Python 的 -m pytest，避免解释器错位。"
         ),
         parameters={
             "type": "object",
@@ -166,4 +316,5 @@ def make_run_command(workspace: Path, budget: int = 6000) -> Tool:
         },
         handler=handler,
         needs_approval=True,
+        danger_check=lambda args: is_dangerous(str(args.get("command", ""))),
     )

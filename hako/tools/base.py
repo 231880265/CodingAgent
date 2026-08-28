@@ -13,6 +13,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 
+DangerCheck = Callable[[dict[str, Any]], str | None]
+
+
 @dataclass
 class ToolResult:
     """工具执行结果。
@@ -24,13 +27,25 @@ class ToolResult:
     ok: bool
     detail: str                 # 回传给模型的内容
     summary: str = ""           # 一行摘要，给 TUI
-    # 副作用声明：哪些文件被写了。上下文管理器据此让历史里的旧读取失效。
+    # 副作用声明：哪些文件被新增、修改或删除。上下文管理器据此让历史里的
+    # 旧读取失效；shell 工具还会把三类净变化分别列出，便于审计。
     touched_paths: tuple[str, ...] = ()
+    created_paths: tuple[str, ...] = ()
+    modified_paths: tuple[str, ...] = ()
+    deleted_paths: tuple[str, ...] = ()
     # 这次调用读的是哪个文件（规范化后的相对路径）。
     # 为什么不用调用参数里的 path：模型写 "./src/a.py"，写工具报的是 "src/a.py"，
     # 字符串比不上——失效机制会静默失灵。规范化必须发生在工具边界，
     # 由工具自己声明"我读的是谁"（见 DESIGN.md #5）。
     subject_path: str = ""
+    # run_command 若执行了内核认可的验证命令，会声明验证类型与原命令。
+    # 主循环只消费这份结构化元数据，不靠 TUI 摘要或模型自述判断是否验证成功。
+    verification_kind: str = ""
+    verification_command: str = ""
+    # 工具内部若调用了模型（例如只读 subagent），把真实 usage 交回主循环。
+    # 否则总 token 只统计主模型，会让 A/B 成本比较失真。
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
 
     def __post_init__(self) -> None:
         if not self.summary:
@@ -44,10 +59,18 @@ class Tool:
     description: str
     parameters: dict[str, Any]          # JSON Schema
     handler: Callable[..., ToolResult]
-    # 只读工具可以并发执行；写工具必须串行（见 DESIGN.md #7）
+    # 工具是否保证只读。当前循环仍然串行执行；这个标记供权限与后续调度使用。
     read_only: bool = False
     # 需要用户批准才能执行
     needs_approval: bool = False
+    # 动态高风险检查。返回规则说明表示必须逐次显式批准，不能被 -y 或
+    # “本会话记住此工具”绕过；None 表示普通权限路径。
+    danger_check: DangerCheck | None = None
+    # 0 表示不限。昂贵的委派工具可限制每个 Agent.run 的调用次数。
+    max_calls_per_run: int = 0
+
+    def danger_reason(self, args: dict[str, Any]) -> str | None:
+        return self.danger_check(args) if self.danger_check is not None else None
 
     def to_openai_schema(self) -> dict[str, Any]:
         return {

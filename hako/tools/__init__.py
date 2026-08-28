@@ -11,10 +11,17 @@ from pathlib import Path
 from typing import Any
 
 from .base import Tool, ToolError, ToolResult
-from .files import make_list_dir, make_read_file, make_write_file
+from .files import make_edit_file, make_list_dir, make_read_file, make_write_file
 from .shell import make_run_command
 
-__all__ = ["Registry", "Tool", "ToolError", "ToolResult", "build_default_registry"]
+__all__ = [
+    "Registry",
+    "Tool",
+    "ToolError",
+    "ToolResult",
+    "build_default_registry",
+    "build_readonly_registry",
+]
 
 
 class Registry:
@@ -100,18 +107,28 @@ def _signature(props: dict[str, Any], required: list[str]) -> str:
     )
 
 
-def build_default_registry(workspace: Path, tool_result_budget: int = 6000) -> Registry:
-    """D1 工具集：读、写、列目录、执行命令。
+def build_readonly_registry(workspace: Path) -> Registry:
+    """只读调查工具集；刻意没有 shell、写入或递归委派。"""
+    return Registry([make_read_file(workspace), make_list_dir(workspace)])
+
+
+def build_default_registry(
+    workspace: Path,
+    tool_result_budget: int = 6000,
+    extra_tools: list[Tool] | None = None,
+) -> Registry:
+    """核心工具集：列目录、读取、局部编辑、整文件写入和执行命令。
 
     刻意保持小：每个工具的 description 在**每一轮**请求里都要付 token，
     语义重叠还会让模型选错。能力覆盖靠 run_command 兜底，
     高频且需要结构化输出控制的操作才单独建工具。
     """
-    return Registry(
-        [
-            make_read_file(workspace),
-            make_write_file(workspace),
-            make_list_dir(workspace),
-            make_run_command(workspace, tool_result_budget),
-        ]
-    )
+    tools = [
+        make_read_file(workspace),
+        make_edit_file(workspace),
+        make_write_file(workspace),
+        make_list_dir(workspace),
+        make_run_command(workspace, tool_result_budget),
+    ]
+    tools.extend(extra_tools or [])
+    return Registry(tools)

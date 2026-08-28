@@ -11,6 +11,10 @@ def read(registry: Registry, **args):
     return registry.invoke("read_file", args)
 
 
+def edit(registry: Registry, **args):
+    return registry.invoke("edit_file", args)
+
+
 def test_read_returns_line_numbers(registry: Registry, workspace: Path):
     (workspace / "a.py").write_text("x = 1\ny = 2\n", encoding="utf-8")
     result = read(registry, path="a.py")
@@ -97,6 +101,114 @@ def test_write_escape_rejected(registry: Registry, workspace: Path):
     )
     assert not result.ok
     assert not (workspace.parent / "evil.py").exists()
+
+
+# ------------------------------------------------------- edit_file
+
+
+def test_edit_replaces_one_unique_match(registry: Registry, workspace: Path):
+    target = workspace / "calculator.py"
+    target.write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+
+    result = edit(
+        registry,
+        path="./calculator.py",
+        old_text="    return a - b",
+        new_text="    return a + b",
+    )
+
+    assert result.ok
+    assert result.touched_paths == ("calculator.py",)
+    assert target.read_text(encoding="utf-8") == "def add(a, b):\n    return a + b\n"
+
+
+def test_edit_zero_match_returns_candidate_without_writing(
+    registry: Registry, workspace: Path
+):
+    target = workspace / "a.py"
+    original = "def total():\n    return left + right\n"
+    target.write_text(original, encoding="utf-8")
+
+    result = edit(
+        registry,
+        path="a.py",
+        old_text="    return left - right",
+        new_text="    return left * right",
+    )
+
+    assert not result.ok
+    assert "匹配 0 处" in result.detail
+    assert "最接近候选" in result.detail
+    assert "left + right" in result.detail
+    assert target.read_text(encoding="utf-8") == original
+
+
+def test_edit_multiple_matches_refuses_to_guess(registry: Registry, workspace: Path):
+    target = workspace / "a.py"
+    original = "value = 1\nkeep = 0\nvalue = 1\n"
+    target.write_text(original, encoding="utf-8")
+
+    result = edit(
+        registry, path="a.py", old_text="value = 1", new_text="value = 2"
+    )
+
+    assert not result.ok
+    assert "匹配 2 处" in result.detail
+    assert "1, 3" in result.detail
+    assert target.read_text(encoding="utf-8") == original
+
+
+def test_edit_detects_overlapping_matches(registry: Registry, workspace: Path):
+    target = workspace / "a.txt"
+    target.write_text("aaa", encoding="utf-8")
+    result = edit(registry, path="a.txt", old_text="aa", new_text="b")
+    assert not result.ok
+    assert "匹配 2 处" in result.detail
+    assert target.read_text(encoding="utf-8") == "aaa"
+
+
+def test_edit_preserves_crlf_when_model_sends_lf(registry: Registry, workspace: Path):
+    target = workspace / "windows.py"
+    target.write_bytes(b"start\r\nold\r\nend\r\n")
+
+    result = edit(
+        registry,
+        path="windows.py",
+        old_text="old\n",
+        new_text="new\n",
+    )
+
+    assert result.ok
+    assert target.read_bytes() == b"start\r\nnew\r\nend\r\n"
+
+
+def test_edit_preserves_existing_gbk_encoding(registry: Registry, workspace: Path):
+    target = workspace / "legacy.py"
+    target.write_bytes("# 中文\nvalue = 1\n".encode("gbk"))
+    result = edit(
+        registry, path="legacy.py", old_text="value = 1", new_text="value = 2"
+    )
+    assert result.ok
+    assert target.read_bytes().decode("gbk") == "# 中文\nvalue = 2\n"
+
+
+def test_edit_noop_does_not_claim_a_touch(registry: Registry, workspace: Path):
+    (workspace / "a.py").write_text("pass\n", encoding="utf-8")
+    result = edit(registry, path="a.py", old_text="pass", new_text="pass")
+    assert result.ok
+    assert result.touched_paths == ()
+    assert "无变化" in result.summary
+
+
+def test_edit_escape_and_empty_locator_rejected(registry: Registry, workspace: Path):
+    (workspace / "a.py").write_text("pass\n", encoding="utf-8")
+    escaped = edit(
+        registry, path="../a.py", old_text="pass", new_text="raise SystemExit"
+    )
+    empty = edit(registry, path="a.py", old_text="", new_text="x")
+    assert not escaped.ok
+    assert not empty.ok
+    assert "old_text 不能为空" in empty.detail
 
 
 def test_list_dir_skips_noise(registry: Registry, workspace: Path):

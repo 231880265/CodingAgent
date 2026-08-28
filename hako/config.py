@@ -11,7 +11,16 @@ from pathlib import Path
 
 # 各家 OpenAI 兼容端点。填了哪个 KEY 就用哪家，省掉一个必填配置项。
 PROVIDERS = {
-    "DEEPSEEK_API_KEY": ("https://api.deepseek.com/v1", "deepseek-chat", 65536),
+    "SILICONFLOW_API_KEY": (
+        "https://api.siliconflow.cn/v1",
+        "deepseek-ai/DeepSeek-V4-Flash",
+        1_000_000,
+    ),
+    "DEEPSEEK_API_KEY": (
+        "https://api.deepseek.com/v1",
+        "deepseek-v4-flash",
+        1_000_000,
+    ),
     "DASHSCOPE_API_KEY": (
         "https://dashscope.aliyuncs.com/compatible-mode/v1",
         "qwen-plus",
@@ -45,6 +54,13 @@ class Config:
     max_steps: int = 40
     # 单个工具结果回传给模型的上限（字符数）。见 truncate.py
     tool_result_budget: int = 6000
+    # 限制单轮回复，避免推理模型在简单工具决策上生成过长内容。
+    max_output_tokens: int = 4096
+    # None 表示不向提供商发送该扩展字段；硅基流动默认关闭长思考以降低交互延迟。
+    enable_thinking: bool | None = None
+    # 默认关闭，便于对照；开启后主 Agent 多一个受限的只读调查工具。
+    enable_subagent: bool = False
+    subagent_max_steps: int = 6
 
     @classmethod
     def from_env(cls, workspace: Path | None = None) -> "Config":
@@ -69,6 +85,14 @@ class Config:
         base_url = os.environ.get("HAKO_BASE_URL", "").strip() or base_url
         model = os.environ.get("HAKO_MODEL", "").strip() or model
 
+        thinking_raw = os.environ.get("HAKO_ENABLE_THINKING", "").strip()
+        if thinking_raw:
+            enable_thinking = _bool_value(thinking_raw, "HAKO_ENABLE_THINKING")
+        elif "siliconflow.cn" in base_url.lower():
+            enable_thinking = False
+        else:
+            enable_thinking = None
+
         return cls(
             api_key=api_key,
             base_url=base_url,
@@ -76,6 +100,10 @@ class Config:
             context_limit=_int_env("HAKO_CONTEXT_LIMIT", context_limit),
             workspace=(workspace or Path.cwd()).resolve(),
             max_steps=_int_env("HAKO_MAX_STEPS", 40),
+            max_output_tokens=_int_env("HAKO_MAX_OUTPUT_TOKENS", 4096),
+            enable_thinking=enable_thinking,
+            enable_subagent=_bool_env("HAKO_ENABLE_SUBAGENT", False),
+            subagent_max_steps=_int_env("HAKO_SUBAGENT_MAX_STEPS", 6),
         )
 
 
@@ -84,3 +112,19 @@ def _int_env(name: str, default: int) -> int:
         return int(os.environ.get(name, "").strip() or default)
     except ValueError:
         return default
+
+
+def _bool_value(raw: str, name: str) -> bool:
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise SystemExit(
+        f"{name} 只能填写 true/false、1/0、yes/no 或 on/off。"
+    )
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    raw = os.environ.get(name, "").strip()
+    return _bool_value(raw, name) if raw else default

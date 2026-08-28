@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from difflib import SequenceMatcher
 from pathlib import Path
 
 from ..truncate import clip_lines
@@ -10,7 +11,7 @@ from .base import Tool, ToolError, ToolResult, rel, resolve_in_workspace
 DEFAULT_READ_LIMIT = 200
 
 
-def _read_text(target: Path) -> str:
+def _read_text_with_encoding(target: Path, *, allow_lossy: bool = True) -> tuple[str, str]:
     """读文本。二进制文件直接拒绝——把 PNG 塞进上下文没有任何意义，纯烧 token。"""
     try:
         raw = target.read_bytes()
@@ -23,10 +24,71 @@ def _read_text(target: Path) -> str:
     # utf-8 优先，失败退 gbk（Windows 上的中文源码常见），最后强制替换。
     for encoding in ("utf-8", "gbk"):
         try:
-            return raw.decode(encoding)
+            return raw.decode(encoding), encoding
         except UnicodeDecodeError:
             continue
-    return raw.decode("utf-8", errors="replace")
+    if allow_lossy:
+        return raw.decode("utf-8", errors="replace"), "utf-8"
+    raise ToolError(f"{target.name} 的文本编码无法可靠识别，为避免损坏已拒绝编辑")
+
+
+def _read_text(target: Path) -> str:
+    return _read_text_with_encoding(target)[0]
+
+
+def _dominant_newline(text: str) -> str:
+    """返回文件的主换行风格；新文件或单行文件使用 LF。"""
+    crlf = text.count("\r\n")
+    lf = text.count("\n") - crlf
+    cr = text.count("\r") - crlf
+    if crlf >= lf and crlf >= cr and crlf:
+        return "\r\n"
+    if cr > lf and cr:
+        return "\r"
+    return "\n"
+
+
+def _adapt_newlines(text: str, newline: str) -> str:
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    return normalized.replace("\n", newline)
+
+
+def _match_positions(text: str, needle: str) -> list[int]:
+    """返回全部匹配位置，包括重叠匹配，避免把歧义误判成唯一。"""
+    positions: list[int] = []
+    start = 0
+    while True:
+        found = text.find(needle, start)
+        if found < 0:
+            return positions
+        positions.append(found)
+        start = found + 1
+
+
+def _nearest_candidate(text: str, needle: str) -> str:
+    """给 0 匹配错误一个可操作的近似位置，而不是只说“没找到”。"""
+    lines = text.splitlines()
+    wanted = needle.splitlines() or [needle]
+    if not lines:
+        return "文件为空，请重新确认目标文件。"
+
+    anchor_offset = next((i for i, line in enumerate(wanted) if line.strip()), 0)
+    anchor = wanted[anchor_offset].strip()
+    best_index = max(
+        range(len(lines)),
+        key=lambda i: SequenceMatcher(None, anchor, lines[i].strip()).ratio(),
+    )
+    width = max(1, len(wanted))
+    start = min(max(0, best_index - anchor_offset), max(0, len(lines) - width))
+    candidate = "\n".join(lines[start : start + width])
+    score = SequenceMatcher(
+        None,
+        _adapt_newlines(needle, "\n"),
+        _adapt_newlines(candidate, "\n"),
+    ).ratio()
+    preview = candidate[:800] + ("…" if len(candidate) > 800 else "")
+    end = min(len(lines), start + width)
+    return f"最接近候选位于第 {start + 1}-{end} 行（相似度 {score:.0%}）：\n{preview}"
 
 
 def make_read_file(workspace: Path) -> Tool:
@@ -119,6 +181,101 @@ def make_write_file(workspace: Path) -> Tool:
                 "content": {"type": "string", "description": "完整文件内容"},
             },
             "required": ["path", "content"],
+        },
+        handler=handler,
+        needs_approval=True,
+    )
+
+
+def make_edit_file(workspace: Path) -> Tool:
+    """创建唯一匹配的 search-replace 工具。
+
+    不接受 unified diff：模型生成的行号容易因上下文漂移失效；也不静默选择第一个
+    匹配，因为“成功执行但改错位置”比明确失败更危险。
+    """
+
+    def handler(path: str, old_text: str, new_text: str) -> ToolResult:
+        target = resolve_in_workspace(workspace, path)
+        if not target.exists():
+            raise ToolError(f"文件不存在：{path}")
+        if target.is_dir():
+            raise ToolError(f"{path} 是目录，无法编辑")
+        if not old_text:
+            raise ToolError("old_text 不能为空；空定位串无法证明编辑位置唯一")
+
+        content, encoding = _read_text_with_encoding(target, allow_lossy=False)
+        newline = _dominant_newline(content)
+        matched_old = old_text
+        positions = _match_positions(content, matched_old)
+
+        # read_file 回传统一使用 LF；目标文件可能是 CRLF。只适配定位串和替换片段，
+        # 不规范化整个文件，因此不会制造“全文件换行变化”的噪声 diff。
+        if not positions:
+            adapted = _adapt_newlines(old_text, newline)
+            if adapted != old_text:
+                matched_old = adapted
+                positions = _match_positions(content, matched_old)
+
+        canonical = rel(workspace, target)
+        if not positions:
+            raise ToolError(
+                f"old_text 在 {canonical} 中匹配 0 处，文件可能已变化。"
+                "请根据候选重新 read_file 后构造定位串。\n"
+                f"{_nearest_candidate(content, old_text)}"
+            )
+        if len(positions) > 1:
+            line_numbers = [content.count("\n", 0, pos) + 1 for pos in positions[:8]]
+            suffix = "…" if len(positions) > 8 else ""
+            raise ToolError(
+                f"old_text 在 {canonical} 中匹配 {len(positions)} 处"
+                f"（起始行：{', '.join(map(str, line_numbers))}{suffix}）。"
+                "为避免改错位置，本次未写入；请增加前后文使定位串唯一。"
+            )
+
+        replacement = _adapt_newlines(new_text, newline)
+        position = positions[0]
+        if matched_old == replacement:
+            return ToolResult(
+                ok=True,
+                detail=f"{canonical} 的目标片段与 new_text 相同，无需写入",
+                summary=f"{canonical} 无变化",
+            )
+
+        updated = content[:position] + replacement + content[position + len(matched_old) :]
+        try:
+            encoded = updated.encode(encoding)
+        except UnicodeEncodeError:
+            raise ToolError(
+                f"new_text 无法使用原文件编码 {encoding} 表示，为避免截断文件已拒绝编辑"
+            ) from None
+        try:
+            target.write_bytes(encoded)
+        except OSError as exc:
+            raise ToolError(f"写入失败：{exc}") from None
+
+        line = content.count("\n", 0, position) + 1
+        return ToolResult(
+            ok=True,
+            detail=f"已编辑 {canonical} 第 {line} 行附近；唯一匹配已替换",
+            summary=f"编辑 {canonical}  第 {line} 行",
+            touched_paths=(canonical,),
+        )
+
+    return Tool(
+        name="edit_file",
+        description=(
+            "局部编辑已有文本文件：把唯一匹配的 old_text 替换为 new_text。"
+            "匹配 0 处会返回最接近候选，匹配多处会拒绝写入；绝不静默选择第一处。"
+            "编辑前必须先 read_file，old_text 应包含足够前后文且保持原缩进。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "工作目录内的已有文件路径"},
+                "old_text": {"type": "string", "description": "必须唯一出现的原始文本"},
+                "new_text": {"type": "string", "description": "替换后的文本，可为空字符串"},
+            },
+            "required": ["path", "old_text", "new_text"],
         },
         handler=handler,
         needs_approval=True,
