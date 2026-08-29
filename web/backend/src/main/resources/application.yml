@@ -1,0 +1,31 @@
+server:
+  address: 127.0.0.1
+  port: 8080
+  shutdown: graceful
+
+spring:
+  application:
+    name: hako-web-backend
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true
+  mvc:
+    async:
+      request-timeout: 0
+
+hako:
+  web:
+    repository-root: ${HAKO_REPOSITORY_ROOT:.}
+    allowed-roots: ${HAKO_WEB_ALLOWED_ROOTS:${HAKO_REPOSITORY_ROOT:.}}
+    python-executable: ${HAKO_PYTHON_EXECUTABLE:python}
+    worker-entrypoint: ${HAKO_WORKER_ENTRYPOINT:web/worker/main.py}
+    start-timeout: 10s
+    kill-grace-period: 5s
+    event-max-count: 2000
+    event-max-bytes: 10MB
+    dev-allowed-origin: ${HAKO_WEB_DEV_ALLOWED_ORIGIN:http://127.0.0.1:5173}
+
+logging:
+  level:
+    root: INFO
+    dev.hako.web: INFO

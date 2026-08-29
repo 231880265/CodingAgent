@@ -1,6 +1,6 @@
 # hako
 
-`hako` 是一个从零实现的命令行 Coding Agent。模型不会直接操作系统，而是通过主循环反复执行“模型决策 → 工具调用 → 结果回传”，直到给出最终答复或触发终止条件。当前重点不是堆功能，而是把工具协议、上下文、权限和失败恢复做成可解释、可测试的工程机制。
+`hako` 是一个从零实现的 Coding Agent，提供命令行入口与本地 Web 控制台。模型不会直接操作系统，而是通过主循环反复执行“模型决策 → 工具调用 → 结果回传”，直到给出最终答复或触发终止条件。当前重点不是堆功能，而是把工具协议、上下文、权限和失败恢复做成可解释、可测试的工程机制。
 
 ## 当前状态
 
@@ -16,6 +16,7 @@
 - Verified Finish：区分只读完成、已验证完成和未验证修改
 - 可选只读 subagent：独立短上下文，仅能列目录/读文件，主 Agent 保留唯一写入与验证权
 - 事件总线和 inline TUI，兼容 Windows / Linux
+- 本地 Web 控制台：Vue 3 + Vant 4 前端、Spring Boot REST/SSE 控制面、每任务一个 Python Worker；支持任务提交、刷新恢复、分级审批、取消和 Verified Finish 证据摘要
 
 2026-08-27 已用硅基流动 `deepseek-ai/DeepSeek-V4-Flash` 在隔离的临时 Git 仓库完成最新版真实多轮验证：
 
@@ -25,7 +26,7 @@ list_dir → read_file × 2 → edit_file → pytest -q (exit=0) → DONE_VERIFI
 
 初始测试为 `2 failed, 1 passed`，Agent 只把折扣公式中的 `1 + percent / 100` 改为 `1 - percent / 100`，测试文件没有变化；内核根据修改后的 `pytest` 成功证据输出 `DONE_VERIFIED`，独立复测为 `3 passed`。本次运行共 5 个模型回合、9,662 tokens、约 51.3 秒。它证明 `edit_file`、真实 tool calling 和 Verified Finish 能端到端闭合；单个样例不能代表任务成功率，后续仍需评测集和消融实验。
 
-完整设计辩护见 [DESIGN.md](DESIGN.md)，时间线与待办见 [PROJECT_STATUS.md](PROJECT_STATUS.md)。
+完整设计辩护见 [DESIGN.md](DESIGN.md)，时间线与待办见 [PROJECT_STATUS.md](PROJECT_STATUS.md)。Web 需求、接口和最终联调记录见 [docs/WEB_CONSOLE_REQUIREMENTS.md](docs/WEB_CONSOLE_REQUIREMENTS.md)、[docs/WEB_CONSOLE_API.md](docs/WEB_CONSOLE_API.md) 与 [docs/WEB_BACKEND_COMPLETION.md](docs/WEB_BACKEND_COMPLETION.md)。
 
 ## 快速开始
 
@@ -58,6 +59,43 @@ SILICONFLOW_API_KEY=
 ```powershell
 .\.venv\Scripts\python.exe main.py -C D:\path\to\repo
 ```
+
+### 本地 Web 控制台
+
+需要 Java 21、Node.js 和仓库内 Python 虚拟环境。在仓库根目录执行一条命令即可同时启动前后端；默认使用真实 Agent，`-AllowedRoot` 决定页面允许选择的仓库范围：
+
+```powershell
+.\start-web.ps1 -AllowedRoot 'D:\path\to\allowed-root'
+```
+
+只验证界面和协议、不调用模型也不修改文件时，使用 Fake Worker：
+
+```powershell
+.\start-web.ps1 -Mode Fake
+```
+
+脚本会检查 Java、Node.js 和 Python 虚拟环境，首次运行自动执行 `npm install`，然后在当前终端并行启动两个服务。打开 `http://127.0.0.1:5173`；按 `Ctrl+C` 会同时回收前后端进程。只检查环境而不启动可执行 `.\start-web.ps1 -CheckOnly`。
+
+需要分别观察或调试两个服务时，也可以手动启动。第一个 PowerShell 启动后端：
+
+```powershell
+Set-Location web\backend
+$env:HAKO_REPOSITORY_ROOT=(Resolve-Path ..\..).Path
+$env:HAKO_WEB_ALLOWED_ROOTS='D:\path\to\allowed-root'
+$env:HAKO_PYTHON_EXECUTABLE=(Resolve-Path ..\..\.venv\Scripts\python.exe).Path
+.\mvnw.cmd spring-boot:run
+```
+
+第二个 PowerShell 启动前端 API 模式：
+
+```powershell
+Set-Location web\frontend
+npm install
+$env:VITE_HAKO_MODE='api'
+npm run dev
+```
+
+打开终端输出中的本机地址。后端默认使用真实 `web/worker/main.py`；只想稳定演示协议且不调用模型时，在启动后端前设置 `$env:HAKO_WORKER_ENTRYPOINT='web/worker/fake_worker.py'`。Fake Worker 不读取或修改工作区，不得把它的结果描述成真实 Agent 成功率。
 
 常用参数：
 
@@ -102,6 +140,10 @@ hako/
     shell.py            run_command、超时和交互命令拦截
   ui/                    inline 渲染、审批和跨平台读键
 tests/                   单元、集成和 CLI 测试
+web/
+  frontend/              Vue 3 + Vant 4 控制台与 Mock/API Gateway
+  backend/               Spring Boot REST/SSE、状态机与 Worker 进程管理
+  worker/                真实/确定性假 Python JSONL Worker
 ```
 
 几个边界需要明确：
@@ -126,7 +168,7 @@ tests/                   单元、集成和 CLI 测试
 
 测试覆盖配置选择、路径逃逸、参数修补、上下文失效、截断、终止条件、事件流、CLI 和跨平台行为。GitHub Actions 在 Windows 与 Ubuntu 上使用 Python 3.12 运行同一套测试。真实模型 smoke test 不放进 CI，避免泄露密钥、产生费用和引入外部服务波动。
 
-2026-08-28 核心测试回归结果：`166 passed, 1 skipped`。临时 smoke 与本地故障标本的业务测试单独执行，不计入项目测试数。
+2026-08-28 最新回归：Python `174 passed, 1 skipped`；Spring Boot `13 passed`；前端 `npm run build` 通过 TypeScript 检查并转换 299 个模块。另用浏览器在 API 模式完成创建任务、SSE、刷新恢复、两次审批与 Verified Finish 摘要。Fake Worker 和本地故障标本不代表真实模型成功率。
 
 ## 下一阶段
 

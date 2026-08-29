@@ -21,6 +21,7 @@
 | 2026-08-28 | pytest 解释器一致性 | Windows bare pytest 使用当前 `sys.executable -m pytest` | EAGLE post-fix 无工具失败、无 `conftest.py` 越界、公开/隐藏全过 |
 | 2026-08-28 | 分级权限与 shell 审计 | 默认拒绝、危险命令逐次确认、命令前后净文件变化进入 `touched_paths` | 真实子进程测试覆盖新增/修改/删除/超时；核心回归 `166 passed, 1 skipped` |
 | 2026-08-28 | `DESIGN.md` 第一版 | 将当前实现整理为十二项可答辩决策，并区分事实、推断和未证明边界 | 361 行；代码引用路径全部存在；未把 compaction、并发或 subagent 收益写成已证明能力 |
+| 2026-08-28 | Web 控制台闭环 | Vue 3 + Vant 4、Spring Boot REST/SSE、真实/假 Python Worker 与刷新恢复 | Python `174 passed, 1 skipped`；Java `13 passed`；前端构建通过；浏览器完成两次审批与 Verified Finish |
 
 ## 本轮具体做了什么
 
@@ -104,6 +105,16 @@ Windows `run_command` 只把 bare `pytest/pytest.exe` 改写为当前 `sys.execu
 
 初版在当前含多份回退材料的仓库中单次快照约 2.5s；剪枝生成目录后实际扫描 43 个业务文件，单次快照约 17.85ms。这个数字只代表当前仓库快照，不外推到任意大型项目。机制只能观察命令返回时仍存在的净变化：同一命令内部创建后删除、工作区外副作用、并发进程归因及大于 1MB 且刻意保持 metadata 的覆盖仍是边界。
 
+## 2026-08-28 Web 一键启动脚本
+
+新增仓库根目录 `start-web.ps1`，把原本需要两个 PowerShell 手动配置的启动流程收束为一条命令。脚本默认启动真实 Worker，也支持 `-Mode Fake` 的无模型联调；它统一设置后端仓库路径、允许访问范围、Python 解释器、Worker 入口和前端 API 代理，检查 Java 21、Node.js 及虚拟环境，并在缺少前端依赖时自动执行 `npm install`。前后端在当前 VS Code 终端并行运行，任一服务异常退出或用户按 `Ctrl+C` 时，脚本只回收自己启动的两个进程树。`-CheckOnly` 可在不启动服务、不安装依赖的情况下完成环境预检。实际冒烟还发现 Maven Wrapper 3.3.4 在 Windows 普通 `.m2` 目录上直接访问空的 `Target[0]` 会退出；现改为先区分普通目录与符号链接，不改变 Maven 版本、下载地址或校验和。验证结果：PowerShell 5.1 语法解析通过，当前 Java 21.0.5、Node.js 22.12.0 和前端依赖预检通过，Maven Wrapper 固定解析到 3.9.16，Fake 模式下后端健康接口与前端首页均返回 HTTP 200；Fake 结果不计作真实模型能力证据。
+
+## 2026-08-28 Web 视口与滚动边界修复
+
+Web 外壳改为严格占满 `100dvh`，`html/body/#app` 禁止页面级滚动，Header、Footer 和提示条固定参与纵向布局，三栏工作区自动获得全部剩余高度。桌面端左侧任务卡完整固定，中央只滚动事件时间线，右侧只在审批与证据超过高度时内部滚动；移除了中央面板强制 `540px` 最小高度造成的小窗口溢出，并压缩任务输入区的最低高度。`900px` 以下改为单列块级流，由主工作区内部滚动，避免 Grid 隐式行在窄屏把左右栏压成零高度。
+
+验证覆盖空闲态和等待审批运行态：`1366×650`、`1024×768`、`1440×900` 的页面 `scrollHeight` 均等于视口高度，左表单无溢出；运行态低高度窗口中时间线和证据栏按预期独立滚动；`800×700` 单列内容顺序正确、页面外壳仍不滚动。前端类型检查与生产构建通过。本次只修改布局样式和任务文本域尺寸，没有修改 Agent、后端或接口状态机。
+
 ## 当前限制
 
 - `edit_file` 是精确 search-replace：它会给近似候选，但不会自动应用模糊匹配，这是有意保留的安全边界。
@@ -117,12 +128,15 @@ Windows `run_command` 只把 bare `pytest/pytest.exe` 改写为当前 `sys.execu
 - Windows bare pytest 已绑定当前解释器；其他 CLI 若同时存在多版本，仍由各工具自身或用户显式路径负责。
 - 只读 subagent 权限和直接机制已验证，但当前 EAGLE 标本没有自然采用证据。
 - `DESIGN.md` 第一版已经对齐代码中的 #1–#9 锚点并扩展到 #12；最终提交前仍需在代码冻结后补稳定 commit/行号链接。
+- Web 当前只保留一个内存任务，服务重启后不可恢复；没有登录、TLS、远程执行或系统级命令沙箱，只适合绑定本机地址。
+- Web 的真实/假 Worker 共用协议，但本轮浏览器联调用的是确定性假 Worker；提交前仍需单独记录一次真实模型 Web smoke，不能把假事件算成模型效果。
 
 ## 待办与优先级
 
 | 优先级 | 待办 | 完成标准 |
 |---|---|---|
 | P0 | 审阅并提交当前本地改动 | `.env` 和 `tmp/` 不入库；配置、编辑/完成判定、可靠行动、安全审计和文档按机制拆分 commit |
+| P0 | 真实 Worker Web smoke | 隔离仓库完成 `read/list → edit → pytest → done_verified`，保留审批、修改范围与独立复测证据，不提交密钥 |
 | P1 | 保留本地评测 | 三个故障标本、隐藏测试和真实结果继续留在 ignored `tmp/`，不混入公开仓库 |
 | P1 | 审校 `DESIGN.md` | 代码冻结后补 commit/行号锚点；与最终 README.txt、视频口径逐项一致 |
 | P2 | 准备交付物 | 约 2 分钟演示视频、精简 README.txt、公开仓库和最终 zip，与实测数据一致 |
@@ -134,12 +148,12 @@ Windows `run_command` 只把 bare `pytest/pytest.exe` 改写为当前 `sys.execu
 | 8/27（原计划 8/28） | 编辑与完成判定 | `edit_file`、Verified Finish、测试和真实 V4-Flash 闭环已完成；待手动提交 |
 | 8/28 | 评测与真实场景 | 三个本地基准、runner、当前基线、只读 subagent 与数据门控已完成 |
 | 8/29 | 可靠行动与安全 | 截断续跑、当前解释器 pytest、分级权限和 shell 净副作用审计均已完成 |
-| 8/30 | 设计辩护 | `DESIGN.md` 初稿已于 8/28 提前完成；补最终锚点并定稿演示流程 |
+| 8/30 | 设计辩护与 Web smoke | `DESIGN.md` 初稿和 Web 确定性闭环已提前完成；补最终锚点并跑一次真实 Worker Web smoke |
 | 8/31 | 冻结与演示 | 录屏、README.txt、仓库清理；不再增加大功能 |
 | 9/1–9/2 | 缓冲与提交 | 全量复测、密钥扫描、公开仓库、打包提交；9/2 24:00 前完成最终 push |
 
 ## 测试与提交纪律
 
-测试口径固定为 `python -m pytest tests -q`：核心测试是 `166 passed, 1 skipped`；临时 smoke 与本地故障标本业务测试单独执行，不混入核心总数。每次提交前还应运行 `git diff --check` 和公开文件密钥扫描。
+测试口径固定为当前解释器运行：Python 核心测试 `174 passed, 1 skipped`，Spring Boot `13 passed`，前端 `npm run build` 通过；临时 smoke 与本地故障标本业务测试单独执行，不混入核心总数。每次提交前还应运行 `git diff --check` 和公开文件密钥扫描。
 
 从本轮开始按“一个可解释机制一个 commit”提交，例如配置接入、文档、`edit_file`、Verified Finish 和评测框架分别提交。真实 `.env`、`tmp/`、`.claude/`、`.codex/`、视频和 zip 保持忽略；由使用者审阅后手动提交，本次实现不自动 stage、commit 或 push。
