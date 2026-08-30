@@ -21,6 +21,8 @@ hako:
     worker-entrypoint: ${HAKO_WORKER_ENTRYPOINT:web/worker/main.py}
     start-timeout: 10s
     kill-grace-period: 5s
+    cancel-timeout: 10s
+    history-database: ${HAKO_WEB_HISTORY_DATABASE:.hako/web-history.db}
     event-max-count: 2000
     event-max-bytes: 10MB
     dev-allowed-origin: ${HAKO_WEB_DEV_ALLOWED_ORIGIN:http://127.0.0.1:5173}

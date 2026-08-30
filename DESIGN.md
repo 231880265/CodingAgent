@@ -1,10 +1,10 @@
 # hako 设计说明
 
-> 第一版，证据截止 2026-08-28。本文不是功能宣传页，而是设计辩护记录：每项都说明问题、选择、被否决方案、代价、验证和踩坑。数字只写已经运行得到的结果；未实现能力明确标注边界。
+> 第一版，证据更新至 2026-08-29。本文不是功能宣传页，而是设计辩护记录：每项都说明问题、选择、被否决方案、代价、验证和踩坑。数字只写已经运行得到的结果；未实现能力明确标注边界。
 
 ## 项目定位与核心主张
 
-`hako` 是一个从零实现的命令行 Coding Agent。用户给出编程任务后，主 Agent 调用大模型决定下一步，再由本地内核校验并执行文件或命令工具，把结果放回历史，直到任务完成或触发明确的失败条件。
+`hako` 是一个从零实现的 Coding Agent，提供命令行与本地 Web 控制台。用户给出编程任务后，主 Agent 调用大模型决定下一步，再由本地内核校验并执行文件或命令工具，把结果放回历史，直到任务完成或触发明确的失败条件。
 
 本项目的目标不是证明“模型会写代码”，而是解决更接近真实软件工程的问题：模型可能输出格式错误、读取旧版本、只分析不行动、修改后不测试、在错误解释器里验证，甚至为了通过测试引入越界补丁。我的核心主张是：
 
@@ -65,6 +65,7 @@ Agent 主循环 ---- messages + tool schemas ----> LLM
 | #10 | 局部编辑采用唯一匹配 search-replace | `hako/tools/files.py` |
 | #11 | 评测采用冻结标本、隐藏测试、白名单和不可覆盖结果 | `tmp/local-evals/runner.py`（本地忽略） |
 | #12 | subagent 只负责隔离的只读调查 | `hako/subagent.py` |
+| #13 | Web 将连续对话建模为 Session，将单条目标建模为 Run | `web/backend/.../SessionService.java`、`web/worker/main.py`、`web/frontend/.../useSessionController.ts` |
 
 ## #1 事件总线：内核不渲染
 
@@ -91,25 +92,27 @@ Agent 主循环 ---- messages + tool schemas ----> LLM
 修改状态遵循：
 
 ```text
-无修改                         -> 可 DONE_READ_ONLY
-edit/write/shell 净文件变化    -> DIRTY
+无业务修改                     -> 可 DONE_READ_ONLY
+edit/write/shell 净业务文件变化 -> DIRTY
 DIRTY + 验证失败               -> 仍 DIRTY，并清空旧成功证据
 DIRTY + 验证成功               -> VERIFIED
 VERIFIED + 再次修改            -> 回到 DIRTY
 VERIFIED + 模型结束            -> DONE_VERIFIED
 ```
 
-验证证据来自 `run_command` 返回的结构化 `verification_kind/command/exit code`，不是模型说“测试已通过”。只接受单一、实际执行的测试、构建或静态检查；`pytest --collect-only`、`pytest || true`、管道和命令拼接不计入。
+验证证据来自 `run_command` 返回的结构化 `verification_kind/command/exit code`，不是模型说“测试已通过”。只接受单一、实际执行的测试、构建或静态检查；`pytest --collect-only`、`pytest || true`、管道和命令拼接不计入。注册表覆盖 Python/Node/Rust/Go/.NET/Java 的常见测试与构建，也覆盖 `g++/clang++/cl/javac/cmake --build/make/ninja/msbuild`，但不会因为任意命令退出码为 0 就把它包装成验证。
+
+shell 产生的路径再分成“业务修改”和“派生产物”：源码、配置和脚本会使状态回到 `DIRTY`；`.exe/.class/.jar/.o` 以及 `build/target/out` 等编译输出仍被审计和展示，但不会把刚建立的成功构建证据反向清空。分类保持保守，例如不会把整个 `bin/` 目录一概视为生成物。
 
 对于无工具回复，`LLMClient` 保留 API 的 `finish_reason`。若为 `length/max_tokens`，或兼容端点未返回原因但 completion usage 已撞上限，内核最多两次要求模型停止纸上分析并调用具体工具；仍截断则 `INCOMPLETE`，不伪装成功，也不无限续跑。
 
-**被否决方案。** 一是完全相信模型的最终文本，无法抵抗自我感觉良好；二是只用 `max_steps`，卡死时止损太晚；三是任何修改后强制固定跑 `pytest`，不同项目可能使用其他测试、构建或静态检查；四是截断后无限续写，会造成不可控 token 消耗。
+**被否决方案。** 一是完全相信模型的最终文本，无法抵抗自我感觉良好；二是只用 `max_steps`，卡死时止损太晚；三是任何修改后强制固定跑 `pytest`，不同项目可能使用其他测试、构建或静态检查；四是截断后无限续写，会造成不可控 token 消耗；五是把编译器生成的二进制也当成人工改动，会形成“构建成功 → 生成 `.exe` → 证据立刻失效”的自相矛盾。
 
-**代价。** 修改后可能多一个模型回合；验证命令白名单可能拒绝合法但复杂的项目命令。当前选择宁可明确 `DONE_UNVERIFIED`，也不把可疑成功包装成完成。
+**代价。** 修改后可能多一个模型决策；验证命令注册表和派生产物分类都可能漏掉合法的新工具链。当前选择允许显式扩展并用回归测试固定语义，宁可明确 `DONE_UNVERIFIED`，也不把可疑成功包装成完成。
 
-**验证。** 单元测试覆盖验证前结束、失败验证、验证后再次写入、后续失败清空旧证据、交互任务状态重置、截断后恢复行动以及连续截断返回 `INCOMPLETE`。SSE 冻结基线曾在长篇正确分析后句中结束并误报 `DONE_READ_ONLY`；修复后真实任务能完成，但该次运行未触发 continuation，因此续跑机制的因果证据来自确定性测试，不能把真实通过强行归因于 nudge。
+**验证。** 单元测试覆盖验证前结束、失败验证、验证后再次写入、后续失败清空旧证据、交互任务状态重置、截断后恢复行动以及连续截断返回 `INCOMPLETE`。另有 C++ 回归固定 `write qsort.cpp → g++ 生成 qsort.exe → 模型结束` 必须得到 `DONE_VERIFIED`，并验证 `bin/release.ps1` 仍属于业务修改。SSE 冻结基线曾在长篇正确分析后句中结束并误报 `DONE_READ_ONLY`；修复后真实任务能完成，但该次运行未触发 continuation，因此续跑机制的因果证据来自确定性测试，不能把真实通过强行归因于 nudge。
 
-**踩坑。** 最初 `ModelReply` 丢弃了 `finish_reason`，主循环无法区分正常停止和输出截断。另一个坑是“曾经测试通过”不等于“最终版本测试通过”，所以任何后续写入都必须清空旧证据。
+**踩坑。** 最初 `ModelReply` 丢弃了 `finish_reason`，主循环无法区分正常停止和输出截断。另一个坑是“曾经测试通过”不等于“最终版本测试通过”，但“编译命令生成二进制”也不等于 Agent 又改了源码；如果只看 `touched_paths` 而不区分 `authored_paths/derived_paths`，Verified Finish 会在正确的 C++ 流程中误判失败。
 
 **答辩一句话。** Verified Finish 不证明代码绝对正确，只证明“最后一次改动之后，确实有一项认可的验证成功”。
 
@@ -171,13 +174,13 @@ Windows 上仅当命令明确以 bare `pytest/pytest.exe` 开头时，实际执�
 
 权限分三层：只读工具无需批准；普通写入和命令默认询问，可由 `-y` 或会话记忆放行；递归删除、Git push/reset/clean、网络下载、系统/磁盘破坏和 DROP 等高风险命令必须逐次人工确认，检查发生在所有快捷放行之前。非交互环境普通操作需要显式 `-y`，高风险操作即使有 `-y` 也拒绝；库调用未传审批策略时默认拒绝有副作用工具。
 
-shell 前后对工作区做快照，区分新增、修改和删除，并合并进 `touched_paths`。版本库内部状态、虚拟环境、依赖、`tmp` 和常见测试缓存在遍历入口剪枝；小于 1MB 的业务文件额外做 BLAKE2 摘要，大文件比较 metadata。失败或超时前留下的文件也会进入 DIRTY 状态。
+shell 前后对工作区做快照，区分新增、修改和删除，并合并进 `touched_paths`；再把编译二进制、字节码和常见构建目录标为 `derived_paths`。全部副作用都会进入事件与审计结果，只有 `authored_paths = touched_paths - derived_paths` 会推进修改状态。版本库内部状态、虚拟环境、依赖、`tmp` 和常见测试缓存在遍历入口剪枝；小于 1MB 的业务文件额外做 BLAKE2 摘要，大文件比较 metadata。失败或超时前留下的业务文件仍会进入 DIRTY 状态。
 
 **被否决方案。** 一是完全移除 shell，Agent 无法安装、测试、构建和检查；二是 `-y` 真正放行一切，隔离评测方便但产品边界不可接受；三是只靠危险字符串拒绝而不做审批分级，无法区分普通命令和需要逐次确认的外部/破坏性操作；四是声称工作区快照等同操作系统沙箱，这是错误安全承诺。
 
 **代价。** 危险检测是保守词法门禁，可能误报且不是完整 PowerShell/sh AST；快照增加固定开销，并只能观察命令结束时仍存在的净变化。当前仓库初版全量扫描约 2.5s，剪枝生成目录后扫描 43 个业务文件，单次约 17.85ms；该数字不外推到其他仓库。
 
-**验证。** 权限测试证明 headless 无 `-y` 拒绝普通副作用、`-y` 和 remembered `run_command` 不能覆盖高风险命令、库默认策略拒绝写工具。真实子进程测试一次产生 `files +1 ~1 -1`，缓存不计入；脚本先写文件再超时，失败结果仍报告该文件。
+**验证。** 权限测试证明 headless 无 `-y` 拒绝普通副作用、`-y` 和 remembered `run_command` 不能覆盖高风险命令、库默认策略拒绝写工具。真实子进程测试一次产生 `files +1 ~1 -1`，缓存不计入；脚本先写文件再超时，失败结果仍报告该文件；C++/Java 构建命令和派生产物分类由独立测试覆盖。
 
 EAGLE 基线展示了解释器错位的真实后果：PATH 中的 pytest 导入失败后，模型新增 `conftest.py` 修补了不存在的项目问题，功能测试全过却违反修改白名单。post-fix 第一次 bare pytest 就由当前 `.venv` 执行，只改两个允许的控制流文件，公开和隐藏测试均通过。
 
@@ -293,11 +296,27 @@ EAGLE 基线展示了解释器错位的真实后果：PATH 中的 pytest 导入�
 
 **答辩一句话。** subagent 是隔离的调查员，不是第二个可以随便改仓库的主工程师。
 
+## #13 Web 会话：Conversation 跟 Session 绑定，不跟单条目标绑定
+
+**问题。** 早期 Web 把一次 prompt、一个 Worker 和一条时间线都叫 task。这样能跑单次演示，却无法自然表达“先定位 → 再修复 → 最后补测试”；如果每次追问都新建 Agent，模型会丢掉前文。如果取消一次运行就杀 Worker，用户也不能继续纠正方向。另一方面，直接把所有操作永久塞进一个全局 Agent，又会让不同仓库任务互相污染。
+
+**决策。** 显式区分四个对象：Workspace 是工具操作目录；Session 是一次连续工程对话并拥有一个 Worker、Agent、Conversation；Run 是用户在 Session 中发送的一条目标；Attachment 是某个 Run 增加的 user context。普通取消只结束 Run 并保活 Session，独立“新会话”才关闭 Worker 并创建全新 Conversation。Session 与 Run 使用两套状态机；事件必须携带 sessionId，Run 事件再携带 runId；后端与前端双重丢弃迟到身份。P1 把可展示事实写入 SQLite 供只读复盘，但不声称能恢复已经退出的 Python Agent。
+
+**被否决方案。** 一是“一 prompt 一 Worker”，实现简单但没有真正多轮上下文；二是把 Cancel 等同于关闭 Session，用户无法在取消跑偏后继续追问；三是让输入框 `+` 同时承担附件和新会话，两个完全不同的生命周期会混淆；四是序列化事件后假装恢复 Conversation，事件重放不能还原 LLM SDK、内存对象和精确 token 状态；五是多 Session 并发，当前单用户本地答辩不需要，却会扩大进程、审批和 Workspace 冲突面。
+
+**代价。** 后端必须维护两套终态不可逆的状态机、Run/Session 级事件身份和 Worker 保活；取消命令时只能杀本次进程树，不能误杀 Worker。SQLite 会保存 prompt 与工具事件，因此它是本地敏感数据，必须留在被忽略目录。P2 历史继续对话暂不支持。
+
+**验证。** Spring 子进程集成测试确认第二 Run 获得新 runId 但 workerId 不变，Fake Worker 明确返回“结合上一轮上下文”；等待审批时取消后 Session 仍为 OPEN，随后可以创建并完成第三 Run；关闭后数据库仍能读取 Run、事件和 Verified Finish。Python 测试确认同一 Agent 的 user history 连续，附件进入同一个 user message，拒绝审批不执行工具但可继续；Windows 30 秒子命令在取消后 5 秒内结束。前端类型检查和生产构建通过。
+
+**踩坑。** 最初把输入框 `+` 误解成新会话入口，后来拆成附件与顶栏“新会话”。另一个坑是 Windows 中只 kill PowerShell 父进程会让 Python/Java 子进程继续持有 stdout，界面虽显示取消但命令仍跑；修法是独立进程组 `CTRL_BREAK`，再以 `taskkill /T /F` 兜底。正常关闭还曾由两个回调各记录一次 `worker_exited`，现收口为一条权威事件。
+
+**答辩一句话。** Run 是一句新目标，Session 才是一段连续工程记忆；取消 Run 不等于关闭记忆，历史可复盘也不等于能复活 Agent。
+
 ## 证据边界：已验证、推断与尚未证明
 
 ### 已验证事实
 
-- 核心回归：`166 passed, 1 skipped`，Windows 与 Ubuntu CI 使用 Python 3.12。
+- 当前本地核心回归：`191 passed, 1 skipped`；Windows 与 Ubuntu CI 使用 Python 3.12，但本次未提交改动尚未获得远端 CI 结论。
 - 真实 V4-Flash 最小闭环已完成 `list/read/edit/pytest/DONE_VERIFIED`；单例只能证明链路可工作。
 - Router、SSE、EAGLE 三个标本均有修复前失败、公开/隐藏测试、白名单和保存结果。
 - SSE 截断不会再被确定性测试误判为只读成功；EAGLE 的 Windows pytest 解释器错位已有真实前后对照。

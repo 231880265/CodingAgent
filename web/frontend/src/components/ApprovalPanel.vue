@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { Button, Tag } from "vant";
+import { Button } from "vant";
 import type { Approval, ApprovalDecision } from "../types/api";
 import { TOOL_LABELS } from "../utils/presentation";
 
@@ -38,9 +38,9 @@ const newText = computed(() => props.approval.tool.args.new_text);
         <p class="eyebrow">APPROVAL</p>
         <h2 id="approval-title">需要你的批准</h2>
       </div>
-      <Tag :type="approval.riskLevel === 'HIGH' ? 'danger' : 'warning'" plain>
-        {{ approval.riskLevel === "HIGH" ? "高风险" : "有副作用" }}
-      </Tag>
+      <span class="risk-label" :data-risk="approval.riskLevel">
+        {{ approval.riskLevel === "HIGH" ? "高风险操作" : "需要确认" }}
+      </span>
     </div>
 
     <div class="approval-subject">
@@ -65,7 +65,7 @@ const newText = computed(() => props.approval.tool.args.new_text);
     </details>
 
     <p class="approval-note">
-      批准后操作才会进入 hako 工具边界；拒绝会以 DENIED 结束任务。
+      操作尚未执行。拒绝只否决这一次调用，Agent 可改用更安全的方案继续。
     </p>
 
     <div class="approval-actions">
@@ -79,11 +79,11 @@ const newText = computed(() => props.approval.tool.args.new_text);
       <Button
         v-if="approval.allowedDecisions.includes('ALLOW_SESSION')"
         plain
-        type="primary"
+        class="session-allow-button"
         :disabled="busy"
         @click="emit('resolve', 'ALLOW_SESSION')"
       >
-        本任务同类允许
+        本会话同类允许
       </Button>
       <Button
         type="primary"

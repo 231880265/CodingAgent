@@ -15,9 +15,12 @@ from __future__ import annotations
 
 import os
 import re
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
+from typing import Callable
 
 from ..fs_audit import diff_snapshots, snapshot_workspace
 from ..truncate import clip_text
@@ -78,17 +81,20 @@ DANGER_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 _COMPOUND_COMMAND = re.compile(r"[;&|\r\n]")
 _NON_EXECUTING_CHECK = re.compile(
     r"(?i)(?:--collect-only|(?:^|\s)--co(?:\s|$)|(?:^|\s)--help(?:\s|$)|"
-    r"(?:^|\s)-h(?:\s|$)|(?:^|\s)--version(?:\s|$)|--list-tests?)"
+    r"(?:^|\s)-h(?:\s|$)|(?:^|\s)--version(?:\s|$)|--list-tests?|"
+    r"(?:^|\s)-N(?:\s|$))"
 )
 _VERIFICATION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "test",
         re.compile(
-            r"(?i)^\s*(?:(?:\S*python(?:\.exe)?|py(?:\.exe)?)\s+-m\s+"
+            r"(?i)^\s*(?:(?:\S*python(?:\.exe)?|py(?:\.exe)?)\s+(?:-B\s+)?-m\s+"
             r"(?:pytest|unittest)|\S*pytest(?:\.exe)?|npm(?:\.cmd)?\s+"
             r"(?:run\s+)?test|pnpm\s+(?:run\s+)?test|yarn\s+(?:run\s+)?test|"
             r"cargo\s+test|go\s+test|dotnet\s+test|mvnw?(?:\.cmd)?\s+.*\btest|"
-            r"gradlew?(?:\.bat)?\s+.*\btest)\b"
+            r"gradlew?(?:\.bat)?\s+.*\btest|ctest(?:\.exe)?(?:\s|$)|"
+            r"meson\s+test\b|java(?:\.exe)?\s+(?:-jar\s+\S*junit-platform-console\S*|"
+            r"org\.junit\.platform\.console\.ConsoleLauncher)\b)"
         ),
     ),
     (
@@ -97,7 +103,12 @@ _VERIFICATION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             r"(?i)^\s*(?:npm(?:\.cmd)?\s+run\s+build|pnpm\s+(?:run\s+)?build|"
             r"yarn\s+(?:run\s+)?build|cargo\s+build|go\s+build|dotnet\s+build|"
             r"mvnw?(?:\.cmd)?\s+.*\bpackage|gradlew?(?:\.bat)?\s+.*\bbuild|"
-            r"(?:\S*python(?:\.exe)?|py(?:\.exe)?)\s+-m\s+compileall)\b"
+            r"(?:\S*python(?:\.exe)?|py(?:\.exe)?)\s+(?:-B\s+)?-m\s+compileall|"
+            r"(?:\S*[\\/])?(?:g\+\+|clang\+\+|c\+\+)(?:\.exe)?\s+.*\.(?:c|cc|cpp|cxx)\b|"
+            r"(?:\S*[\\/])?cl(?:\.exe)?\s+.*\.(?:c|cc|cpp|cxx)\b|"
+            r"(?:\S*[\\/])?javac(?:\.exe)?\s+.*(?:\.java\b|@\S+)|"
+            r"cmake(?:\.exe)?\s+--build\b|(?:mingw32-)?make(?:\.exe)?(?:\s|$)|"
+            r"ninja(?:\.exe)?(?:\s|$)|msbuild(?:\.exe)?\s+\S+)"
         ),
     ),
     (
@@ -110,6 +121,87 @@ _VERIFICATION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 
 _BARE_PYTEST = re.compile(r"(?i)^pytest(?:\.exe)?(?P<args>(?:\s+.*)?)$")
+
+
+class _CommandCancelled(RuntimeError):
+    """协作式取消命令；不是工具故障，也不关闭承载 Agent 的 Worker。"""
+
+
+def _terminate_process_tree(proc: subprocess.Popen[str]) -> None:
+    """只终止本次 shell 命令树，保留上层 Python Worker。"""
+    if proc.poll() is not None:
+        return
+    if sys.platform == "win32":
+        # CREATE_NEW_PROCESS_GROUP 让 PowerShell 及其编译器/测试子进程共享独立组。
+        # 先向整组发送 CTRL_BREAK；这比只 kill PowerShell 父进程更可靠，后者会
+        # 让 python/java/npm 子进程继续持有 stdout 管道，communicate() 仍会挂住。
+        try:
+            proc.send_signal(signal.CTRL_BREAK_EVENT)
+            proc.wait(timeout=1)
+            return
+        except (OSError, subprocess.SubprocessError):
+            pass
+        try:
+            killed = subprocess.run(
+                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+            if killed.returncode != 0 and proc.poll() is None:
+                proc.kill()
+        except (OSError, subprocess.SubprocessError):
+            proc.kill()
+        return
+
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        proc.wait(timeout=1)
+    except (OSError, subprocess.TimeoutExpired):
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except OSError:
+            proc.kill()
+
+
+def _run_cancellable(
+    argv: list[str],
+    *,
+    workspace: Path,
+    env: dict[str, str],
+    timeout: int,
+    cancelled: Callable[[], bool],
+) -> subprocess.CompletedProcess[str]:
+    options: dict[str, object] = {
+        "cwd": workspace,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
+        "env": env,
+        "stdin": subprocess.DEVNULL,
+    }
+    if sys.platform == "win32":
+        options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        options["start_new_session"] = True
+
+    proc = subprocess.Popen(argv, **options)  # type: ignore[arg-type]
+    started = time.monotonic()
+    while True:
+        try:
+            stdout, stderr = proc.communicate(timeout=0.1)
+            return subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr)
+        except subprocess.TimeoutExpired:
+            if cancelled():
+                _terminate_process_tree(proc)
+                proc.communicate()
+                raise _CommandCancelled from None
+            if time.monotonic() - started >= timeout:
+                _terminate_process_tree(proc)
+                proc.communicate()
+                raise subprocess.TimeoutExpired(argv, timeout) from None
 
 
 def classify_verification(command: str) -> str | None:
@@ -188,7 +280,14 @@ def is_dangerous(command: str) -> str | None:
     return None
 
 
-def make_run_command(workspace: Path, budget: int = 6000) -> Tool:
+def make_run_command(
+    workspace: Path,
+    budget: int = 6000,
+    *,
+    cancelled: Callable[[], bool] | None = None,
+) -> Tool:
+    is_cancelled = cancelled or (lambda: False)
+
     def handler(command: str, timeout: int = DEFAULT_TIMEOUT) -> ToolResult:
         requested_command = (command or "").strip()
         if not requested_command:
@@ -208,18 +307,33 @@ def make_run_command(workspace: Path, budget: int = 6000) -> Tool:
         before = snapshot_workspace(workspace)
 
         try:
-            proc = subprocess.run(
+            proc = _run_cancellable(
                 shell_argv(executed_command),
-                cwd=workspace,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
+                workspace=workspace,
                 timeout=timeout,
                 env=env,
-                # stdin 接空设备：命令若仍试图读输入会立刻 EOF 失败，
-                # 而不是静默等到超时。快速失败优于慢速失败。
-                stdin=subprocess.DEVNULL,
+                cancelled=is_cancelled,
+            )
+        except _CommandCancelled:
+            effects = diff_snapshots(before, snapshot_workspace(workspace))
+            detail = (
+                f"命令已由用户取消：{requested_command}\n"
+                "只终止了本次命令进程树；Worker 与会话上下文继续保留。"
+            )
+            if audit_detail := effects.detail():
+                detail = f"{detail}\n{audit_detail}"
+            verification_kind = classify_verification(requested_command)
+            return ToolResult(
+                ok=False,
+                detail=detail,
+                summary=f"{requested_command[:70]}  cancelled · {effects.summary or 'files unchanged'}",
+                touched_paths=effects.touched_paths,
+                created_paths=effects.created,
+                modified_paths=effects.modified,
+                deleted_paths=effects.deleted,
+                derived_paths=effects.derived_paths,
+                verification_kind=verification_kind or "",
+                verification_command=requested_command if verification_kind else "",
             )
         except subprocess.TimeoutExpired:
             effects = diff_snapshots(before, snapshot_workspace(workspace))
@@ -239,6 +353,7 @@ def make_run_command(workspace: Path, budget: int = 6000) -> Tool:
                 created_paths=effects.created,
                 modified_paths=effects.modified,
                 deleted_paths=effects.deleted,
+                derived_paths=effects.derived_paths,
                 verification_kind=verification_kind or "",
                 verification_command=(
                     executed_command if verification_kind and normalized
@@ -285,6 +400,7 @@ def make_run_command(workspace: Path, budget: int = 6000) -> Tool:
             created_paths=effects.created,
             modified_paths=effects.modified,
             deleted_paths=effects.deleted,
+            derived_paths=effects.derived_paths,
             verification_kind=verification_kind or "",
             verification_command=(
                 executed_command if verification_kind and normalized

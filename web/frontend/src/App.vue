@@ -1,65 +1,86 @@
 <script setup lang="ts">
-import { computed, onMounted } from "vue";
-import { Button, Progress, showConfirmDialog } from "vant";
+import { onMounted } from "vue";
+import { showConfirmDialog } from "vant";
 import AppHeader from "./components/AppHeader.vue";
 import ApprovalPanel from "./components/ApprovalPanel.vue";
-import EvidenceSummary from "./components/EvidenceSummary.vue";
 import RunTimeline from "./components/RunTimeline.vue";
+import SessionHistoryDrawer from "./components/SessionHistoryDrawer.vue";
 import TaskComposer from "./components/TaskComposer.vue";
-import { useTaskController } from "./composables/useTaskController";
-import type { CreateTaskRequest } from "./types/api";
-import { STATUS_LABELS, formatTokens } from "./utils/presentation";
+import { useSessionController } from "./composables/useSessionController";
+import type { CreateRunRequest, CreateSessionRequest } from "./types/api";
 
 const {
   gatewayMode,
-  task,
-  events,
+  session,
+  displayedEvents,
   summary,
   model,
   connection,
   streamConnected,
-  status,
+  runStatus,
+  sessionStatus,
   isActive,
   pendingApproval,
-  contextPercent,
   actionPending,
   approvalPending,
   errorMessage,
+  historyItems,
+  historyOpen,
+  selectedHistory,
+  viewingHistory,
   initialize,
-  startTask,
+  startSession,
+  createRun,
   resolveApproval,
-  cancelTask,
+  cancelRun,
+  newSession,
+  toggleHistory,
+  openHistory,
+  closeHistoryView,
   dismissError,
-} = useTaskController();
+} = useSessionController();
 
-const taskTitle = computed(() => {
-  if (!task.value) return "等待任务";
-  const firstLine = task.value.prompt.split(/\r?\n/, 1)[0]?.trim() ?? "当前任务";
-  return firstLine.length > 58 ? `${firstLine.slice(0, 58)}…` : firstLine;
-});
+async function submitSession(request: CreateSessionRequest): Promise<void> {
+  await startSession(request);
+}
 
-const workspaceName = computed(() => {
-  if (!task.value) return "尚未选择工作区";
-  const parts = task.value.workspace.split(/[\\/]/).filter(Boolean);
-  return parts.at(-1) ?? task.value.workspace;
-});
-
-async function submitTask(request: CreateTaskRequest): Promise<void> {
-  await startTask(request);
+async function submitRun(request: CreateRunRequest): Promise<void> {
+  await createRun(request);
 }
 
 async function confirmCancel(): Promise<void> {
   try {
     await showConfirmDialog({
-      title: "取消当前任务？",
-      message: "Worker 会被终止，但已经发生的文件修改不会自动回滚。",
-      confirmButtonText: "确认取消",
+      title: "停止当前 Run？",
+      message: "只停止本轮后续行为；Session、Conversation 和已经落盘的文件修改都会保留。",
+      confirmButtonText: "停止本轮",
       cancelButtonText: "继续运行",
       confirmButtonColor: "oklch(52% 0.17 28)",
     });
-    await cancelTask();
+    await cancelRun();
   } catch {
-    // 用户关闭确认框，任务继续运行。
+    // 用户关闭确认框，当前 Run 继续运行。
+  }
+}
+
+async function confirmNewSession(): Promise<void> {
+  if (!session.value) {
+    await newSession();
+    return;
+  }
+  try {
+    await showConfirmDialog({
+      title: "新建独立会话？",
+      message: isActive.value
+        ? "hako 会先取消当前 Run，再等待 Worker 退出。文件修改不回滚，新 Session 的 Conversation 为空。"
+        : "当前 Worker 与 Conversation 会关闭；文件修改保留，新 Session 的上下文为空。",
+      confirmButtonText: "新建会话",
+      cancelButtonText: "留在当前会话",
+      confirmButtonColor: "oklch(48% 0.12 250)",
+    });
+    await newSession();
+  } catch {
+    // 保留当前 Session。
   }
 }
 
@@ -71,14 +92,19 @@ onMounted(() => void initialize());
     <AppHeader
       :connection="connection"
       :stream-connected="streamConnected"
-      :status="status"
+      :run-status="runStatus"
+      :session-status="sessionStatus"
       :mode="gatewayMode"
       :model="model"
+      :workspace="session?.workspace ?? null"
+      :stop-reason="summary?.stopReason ?? null"
+      :busy="actionPending"
+      @new-session="confirmNewSession"
+      @history="toggleHistory"
     />
 
     <div v-if="gatewayMode === 'mock'" class="environment-notice" role="status">
-      <span class="notice-label">演示数据</span>
-      当前页面使用与 API 同结构的本地事件，不会读取工作区，也不会调用模型。
+      界面演示模式：协议与状态机保持一致，但不会读写磁盘或调用模型。
     </div>
 
     <div v-if="errorMessage" class="error-banner" role="alert">
@@ -87,102 +113,68 @@ onMounted(() => void initialize());
       <button type="button" aria-label="关闭错误提示" @click="dismissError">关闭</button>
     </div>
 
-    <main class="console-grid">
-      <aside class="composer-rail">
-        <TaskComposer
-          :disabled="isActive"
-          :busy="actionPending"
-          :mode="gatewayMode"
-          :task="task"
-          @submit="submitTask"
-        />
-      </aside>
+    <main class="conversation-main">
+      <section
+        class="conversation-surface"
+        :class="{ 'is-launcher': !session && !viewingHistory }"
+        aria-label="hako 工程对话"
+      >
+        <div v-if="!session && !viewingHistory" class="launcher-view">
+          <div class="launcher-copy">
+            <h1>开始一个 Coding Task</h1>
+            <p>选择工作区，然后描述任务。</p>
+          </div>
+          <TaskComposer
+            :active="isActive"
+            :busy="actionPending"
+            :disabled="false"
+            :mode="gatewayMode"
+            :session="session"
+            @start="submitSession"
+            @continue="submitRun"
+            @cancel="confirmCancel"
+          />
+        </div>
 
-      <section class="run-panel" aria-labelledby="run-title">
-        <header class="run-panel-header">
-          <div class="run-identity">
-            <p class="workspace-name">{{ workspaceName }}</p>
-            <h1 id="run-title">{{ taskTitle }}</h1>
-            <p v-if="task" class="workspace-path" :title="task.workspace">
-              {{ task.workspace }}
-            </p>
-          </div>
-          <div class="run-controls">
-            <span class="status-text" :data-status="status">
-              {{ STATUS_LABELS[status] }}
-            </span>
-            <Button
-              v-if="isActive"
-              plain
-              class="cancel-button"
-              :loading="actionPending"
-              @click="confirmCancel"
-            >
-              取消任务
-            </Button>
-          </div>
-        </header>
-
-        <div v-if="task" class="run-progress" aria-label="运行进度">
-          <div class="progress-fact">
-            <span>回合</span>
-            <strong>{{ task.progress.step ?? 0 }} / {{ task.progress.maxSteps }}</strong>
-          </div>
-          <div class="context-meter">
-            <div class="context-labels">
-              <span>上下文</span>
-              <strong>
-                {{ formatTokens(task.progress.usedTokens) }} /
-                {{ formatTokens(task.progress.contextLimit) }}
-              </strong>
+        <template v-else>
+          <div v-if="viewingHistory && selectedHistory" class="history-view-banner">
+            <div>
+              <strong>历史 Session · 只读</strong>
+              <span>{{ selectedHistory.workspace }} · {{ selectedHistory.runCount }} Run</span>
             </div>
-            <Progress
-              :percentage="contextPercent"
-              :show-pivot="false"
-              :stroke-width="4"
-              color="oklch(55% 0.15 258)"
-              track-color="oklch(91% 0.012 255)"
+            <button type="button" @click="closeHistoryView">返回当前会话</button>
+          </div>
+
+          <RunTimeline :events="displayedEvents" :active="isActive && !viewingHistory" />
+
+          <div class="conversation-dock">
+            <ApprovalPanel
+              v-if="pendingApproval && !viewingHistory"
+              :approval="pendingApproval"
+              :busy="approvalPending"
+              @resolve="resolveApproval"
+            />
+            <TaskComposer
+              :active="isActive"
+              :busy="actionPending"
+              :disabled="viewingHistory"
+              :mode="gatewayMode"
+              :session="session"
+              @start="submitSession"
+              @continue="submitRun"
+              @cancel="confirmCancel"
             />
           </div>
-          <div class="stream-fact">
-            <span class="status-dot" :data-live="streamConnected" aria-hidden="true"></span>
-            {{
-              streamConnected
-                ? "实时事件"
-                : isActive
-                  ? "等待事件流"
-                  : task
-                    ? "事件流已结束"
-                    : "等待事件流"
-            }}
-          </div>
-        </div>
-
-        <RunTimeline :events="events" :active="isActive" />
+        </template>
       </section>
-
-      <aside class="evidence-rail">
-        <ApprovalPanel
-          v-if="pendingApproval"
-          :approval="pendingApproval"
-          :busy="approvalPending"
-          @resolve="resolveApproval"
-        />
-        <div v-else class="approval-clear" aria-label="审批状态">
-          <div>
-            <p class="eyebrow">APPROVAL</p>
-            <strong>无待处理操作</strong>
-          </div>
-          <span aria-hidden="true">✓</span>
-        </div>
-
-        <EvidenceSummary :task="task" :summary="summary" />
-      </aside>
     </main>
 
-    <footer class="app-footer">
-      <span>hako Web Console · local-first</span>
-      <span>浏览器不保存 API Key，模型说明不等于验证证据</span>
-    </footer>
+    <SessionHistoryDrawer
+      :open="historyOpen"
+      :items="historyItems"
+      :busy="actionPending"
+      @close="toggleHistory"
+      @select="openHistory"
+    />
   </div>
 </template>

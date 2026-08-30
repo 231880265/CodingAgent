@@ -54,6 +54,91 @@ function Start-HakoChildProcess {
     return $process
 }
 
+function Assert-HakoPortAvailable {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$Port,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ServiceName
+    )
+
+    $listener = [System.Net.Sockets.TcpListener]::new(
+        [System.Net.IPAddress]::Loopback,
+        $Port
+    )
+    $listener.Server.ExclusiveAddressUse = $true
+    try {
+        $listener.Start()
+    }
+    catch {
+        throw "Port $Port is already in use, so $ServiceName cannot start. Stop the previous hako Web instance and try again."
+    }
+    finally {
+        $listener.Stop()
+    }
+}
+
+function Wait-HakoHttpReady {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Uri,
+
+        [Parameter(Mandatory = $true)]
+        [System.Diagnostics.Process]$Process,
+
+        [Parameter(Mandatory = $true)]
+        [int]$TimeoutSeconds,
+
+        [string]$ExpectedJsonStatus = ""
+    )
+
+    Write-Host "[$Name] waiting for readiness (up to $TimeoutSeconds seconds)..." -ForegroundColor DarkGray
+    $timer = [System.Diagnostics.Stopwatch]::StartNew()
+    $lastFailure = "no response"
+
+    while ($timer.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
+        if ($Process.HasExited) {
+            throw "$Name exited during startup with code $($Process.ExitCode). Check the service output above."
+        }
+
+        try {
+            $response = Invoke-WebRequest `
+                -UseBasicParsing `
+                -Uri $Uri `
+                -Method Get `
+                -TimeoutSec 2 `
+                -ErrorAction Stop
+
+            if ([int]$response.StatusCode -lt 200 -or [int]$response.StatusCode -ge 300) {
+                throw "HTTP $($response.StatusCode)"
+            }
+
+            if (-not [string]::IsNullOrWhiteSpace($ExpectedJsonStatus)) {
+                $payload = $response.Content | ConvertFrom-Json -ErrorAction Stop
+                if ([string]$payload.status -ne $ExpectedJsonStatus) {
+                    throw "health status is '$($payload.status)', expected '$ExpectedJsonStatus'"
+                }
+            }
+
+            $timer.Stop()
+            Write-Host "[$Name] ready." -ForegroundColor Green
+            return
+        }
+        catch {
+            $lastFailure = $_.Exception.Message
+        }
+
+        Start-Sleep -Milliseconds 500
+    }
+
+    $timer.Stop()
+    throw "$Name did not become ready within $TimeoutSeconds seconds. Last check: $lastFailure"
+}
+
 function Stop-HakoProcessTree {
     param(
         [System.Diagnostics.Process]$Process,
@@ -148,6 +233,9 @@ if ($CheckOnly) {
     return
 }
 
+Assert-HakoPortAvailable -Port 8080 -ServiceName "backend"
+Assert-HakoPortAvailable -Port 5173 -ServiceName "frontend"
+
 if (-not (Test-Path -LiteralPath $viteExecutable -PathType Leaf)) {
     Write-Host "First startup: installing frontend dependencies..." -ForegroundColor Yellow
     Push-Location $frontendDirectory
@@ -211,10 +299,23 @@ try {
         -WorkingDirectory $backendDirectory `
         -CommandLine "mvnw.cmd spring-boot:run"
 
+    Wait-HakoHttpReady `
+        -Name "backend" `
+        -Uri "http://127.0.0.1:8080/api/v1/health" `
+        -Process $backendProcess `
+        -TimeoutSeconds 180 `
+        -ExpectedJsonStatus "UP"
+
     $frontendProcess = Start-HakoChildProcess `
         -Name "frontend" `
         -WorkingDirectory $frontendDirectory `
         -CommandLine "npm.cmd run dev -- --strictPort"
+
+    Wait-HakoHttpReady `
+        -Name "frontend" `
+        -Uri "http://127.0.0.1:5173" `
+        -Process $frontendProcess `
+        -TimeoutSeconds 30
 
     Write-Host ""
     Write-Host "Frontend: http://127.0.0.1:5173" -ForegroundColor Cyan

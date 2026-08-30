@@ -15,6 +15,8 @@ public class WebProperties {
     private Path workerEntrypoint = Path.of("web/worker/main.py");
     private Duration startTimeout = Duration.ofSeconds(10);
     private Duration killGracePeriod = Duration.ofSeconds(5);
+    private Duration cancelTimeout = Duration.ofSeconds(10);
+    private Path historyDatabase = Path.of(".hako", "web-history.db");
     private int eventMaxCount = 2000;
     private DataSize eventMaxBytes = DataSize.ofMegabytes(10);
     private String devAllowedOrigin = "http://127.0.0.1:5173";
@@ -65,6 +67,22 @@ public class WebProperties {
 
     public void setKillGracePeriod(Duration killGracePeriod) {
         this.killGracePeriod = killGracePeriod;
+    }
+
+    public Duration getCancelTimeout() {
+        return cancelTimeout;
+    }
+
+    public void setCancelTimeout(Duration cancelTimeout) {
+        this.cancelTimeout = cancelTimeout;
+    }
+
+    public Path getHistoryDatabase() {
+        return historyDatabase;
+    }
+
+    public void setHistoryDatabase(Path historyDatabase) {
+        this.historyDatabase = historyDatabase;
     }
 
     public int getEventMaxCount() {

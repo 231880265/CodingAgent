@@ -1,21 +1,37 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { Tag } from "vant";
-import type { TaskStatus } from "../types/api";
-import { STATUS_LABELS } from "../utils/presentation";
+import type { RunStatus, SessionStatus, StopReason } from "../types/api";
+import { statusPresentation } from "../utils/presentation";
 
 const props = defineProps<{
   connection: "CHECKING" | "UP" | "DOWN";
   streamConnected: boolean;
-  status: TaskStatus | "IDLE";
+  runStatus: RunStatus | "IDLE";
+  sessionStatus: SessionStatus | "NONE";
   mode: "mock" | "api";
   model: string | null;
+  workspace: string | null;
+  stopReason: StopReason | null;
+  busy: boolean;
 }>();
 
+const emit = defineEmits<{
+  newSession: [];
+  history: [];
+}>();
+const runPresentation = computed(() =>
+  statusPresentation(props.runStatus, props.stopReason),
+);
+const workspaceName = computed(() => {
+  if (!props.workspace) return "";
+  const parts = props.workspace.split(/[\\/]/).filter(Boolean);
+  return parts.at(-1) ?? props.workspace;
+});
 const connectionLabel = computed(() => {
-  if (props.connection === "CHECKING") return "正在检查服务";
-  if (props.connection === "DOWN") return "服务未连接";
-  if (props.status !== "IDLE" && props.streamConnected) return "事件流已连接";
+  if (props.connection === "CHECKING") return "检查服务";
+  if (props.connection === "DOWN") return "服务断开";
+  if (props.streamConnected) return "在线";
+  if (props.sessionStatus === "CLOSED") return "会话已关闭";
   return "服务可用";
 });
 </script>
@@ -24,24 +40,39 @@ const connectionLabel = computed(() => {
   <header class="app-header">
     <div class="brand-block">
       <div class="brand-mark" aria-hidden="true">h</div>
-      <div>
-        <div class="brand-name">hako</div>
-        <div class="brand-caption">工程任务控制台</div>
-      </div>
+      <strong class="brand-name">hako</strong>
     </div>
 
-    <div class="header-context" aria-label="当前运行信息">
+    <div
+      v-if="workspace"
+      class="header-workspace"
+      :title="workspace"
+    >
+      <span class="folder-mark" aria-hidden="true"></span>
+      <span>{{ workspaceName }}</span>
+    </div>
+
+    <div class="header-context" aria-label="当前会话状态">
+      <button type="button" class="header-quiet-action" @click="emit('history')">
+        历史
+      </button>
       <span v-if="model" class="model-name" :title="model">{{ model }}</span>
-      <Tag plain class="mode-tag">
-        {{ mode === "mock" ? "界面演示" : "本地 API" }}
-      </Tag>
       <span class="connection-state" :data-state="connection">
         <span class="status-dot" aria-hidden="true"></span>
-        {{ connectionLabel }}
+        {{ mode === "mock" ? "界面演示" : connectionLabel }}
       </span>
-      <span class="run-state" :data-status="status">
-        {{ STATUS_LABELS[status] }}
+      <span v-if="runStatus !== 'IDLE'" class="run-state" :data-tone="runPresentation.tone">
+        {{ runPresentation.label }}
       </span>
+      <button
+        v-if="workspace || sessionStatus !== 'NONE'"
+        type="button"
+        class="new-session-button"
+        :disabled="busy"
+        @click="emit('newSession')"
+      >
+        <span aria-hidden="true">＋</span> 新会话
+      </button>
     </div>
   </header>
 </template>

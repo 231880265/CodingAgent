@@ -69,6 +69,13 @@ class ToolCallFinished(Event):
     summary: str          # 一行摘要，给 TUI 显示
     detail: str           # 回传给模型的完整（已截断）结果
     duration_ms: int
+    touched_paths: tuple[str, ...] = ()
+    created_paths: tuple[str, ...] = ()
+    modified_paths: tuple[str, ...] = ()
+    deleted_paths: tuple[str, ...] = ()
+    derived_paths: tuple[str, ...] = ()
+    verification_kind: str = ""
+    verification_command: str = ""
     kind: str = field(init=False, default="tool_call_finished")
 
 

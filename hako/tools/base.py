@@ -33,6 +33,9 @@ class ToolResult:
     created_paths: tuple[str, ...] = ()
     modified_paths: tuple[str, ...] = ()
     deleted_paths: tuple[str, ...] = ()
+    # 编译器、构建系统生成的派生文件仍属于可审计副作用，但不等于作者又修改了源码。
+    # 否则 `g++ a.cpp -o a.exe` 会先留下成功构建证据，又因 a.exe 新增而立即把证据清空。
+    derived_paths: tuple[str, ...] = ()
     # 这次调用读的是哪个文件（规范化后的相对路径）。
     # 为什么不用调用参数里的 path：模型写 "./src/a.py"，写工具报的是 "src/a.py"，
     # 字符串比不上——失效机制会静默失灵。规范化必须发生在工具边界，
@@ -51,6 +54,12 @@ class ToolResult:
         if not self.summary:
             first = self.detail.strip().splitlines()
             self.summary = first[0][:120] if first else ("ok" if self.ok else "failed")
+
+    @property
+    def authored_paths(self) -> tuple[str, ...]:
+        """可能代表交付内容的变更；排除已识别的构建产物。"""
+        derived = set(self.derived_paths)
+        return tuple(path for path in self.touched_paths if path not in derived)
 
 
 @dataclass

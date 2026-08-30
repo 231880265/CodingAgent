@@ -2,17 +2,24 @@ import type {
   ApprovalDecision,
   ApprovalResponse,
   CancelResponse,
-  CreateTaskRequest,
+  CreateRunRequest,
+  CreateSessionRequest,
   GatewayEventHandlers,
   HakoEvent,
   HakoEventType,
   HakoGateway,
   HealthResponse,
-  TaskResource,
-  TaskSummary,
+  RunSummary,
+  SessionCloseResponse,
+  SessionHistory,
+  SessionHistoryList,
+  SessionResource,
 } from "../types/api";
 
 const SSE_EVENT_TYPES: HakoEventType[] = [
+  "session_status",
+  "worker_exited",
+  "run_status",
   "run_started",
   "turn_started",
   "assistant_text",
@@ -25,26 +32,16 @@ const SSE_EVENT_TYPES: HakoEventType[] = [
   "subagent_finished",
   "run_finished",
   "agent_error",
-  "task_status",
   "approval_required",
   "approval_resolved",
-  "task_result",
+  "run_result",
   "worker_error",
-  "task_cancelled",
+  "run_cancelled",
   "stream_gap",
 ];
 
-const TERMINAL_EVENT_TYPES = new Set<HakoEventType>([
-  "task_result",
-  "worker_error",
-  "task_cancelled",
-]);
-
 interface ErrorEnvelope {
-  error?: {
-    code?: string;
-    message?: string;
-  };
+  error?: { code?: string; message?: string };
 }
 
 export class ApiGateway implements HakoGateway {
@@ -59,74 +56,89 @@ export class ApiGateway implements HakoGateway {
     return this.request<HealthResponse>("/health");
   }
 
-  createTask(request: CreateTaskRequest): Promise<TaskResource> {
-    return this.request<TaskResource>("/tasks", {
+  createSession(request: CreateSessionRequest): Promise<SessionResource> {
+    return this.request<SessionResource>("/sessions", {
       method: "POST",
       body: JSON.stringify(request),
     });
   }
 
-  getTask(taskId: string): Promise<TaskResource> {
-    return this.request<TaskResource>(`/tasks/${encodeURIComponent(taskId)}`);
+  createRun(sessionId: string, request: CreateRunRequest): Promise<SessionResource> {
+    return this.request<SessionResource>(
+      `/sessions/${encodeURIComponent(sessionId)}/runs`,
+      { method: "POST", body: JSON.stringify(request) },
+    );
   }
 
-  streamTaskEvents(taskId: string, handlers: GatewayEventHandlers): () => void {
+  getSession(sessionId: string): Promise<SessionResource> {
+    return this.request<SessionResource>(`/sessions/${encodeURIComponent(sessionId)}`);
+  }
+
+  streamSessionEvents(sessionId: string, handlers: GatewayEventHandlers): () => void {
     const source = new EventSource(
-      `${this.baseUrl}/tasks/${encodeURIComponent(taskId)}/events`,
+      `${this.baseUrl}/sessions/${encodeURIComponent(sessionId)}/events`,
     );
     const delivered = new Set<number>();
-
     const receive = (message: MessageEvent<string>) => {
       try {
         const event = JSON.parse(message.data) as HakoEvent;
-        if (delivered.has(event.eventId)) {
-          return;
-        }
+        if (event.sessionId !== sessionId || delivered.has(event.eventId)) return;
         delivered.add(event.eventId);
         handlers.onEvent(event);
-        if (TERMINAL_EVENT_TYPES.has(event.type)) {
-          source.close();
-        }
       } catch (error) {
         handlers.onError?.(
           error instanceof Error ? error : new Error("无法解析 SSE 事件。"),
         );
       }
     };
-
     for (const type of SSE_EVENT_TYPES) {
       source.addEventListener(type, receive as EventListener);
     }
     source.onopen = () => handlers.onOpen?.();
     source.onerror = () => handlers.onDisconnect?.();
-
     return () => source.close();
   }
 
   respondApproval(
-    taskId: string,
+    sessionId: string,
+    runId: string,
     approvalId: string,
     decision: ApprovalDecision,
   ): Promise<ApprovalResponse> {
     return this.request<ApprovalResponse>(
-      `/tasks/${encodeURIComponent(taskId)}/approvals/${encodeURIComponent(approvalId)}`,
-      {
-        method: "POST",
-        body: JSON.stringify({ decision }),
-      },
+      `/sessions/${encodeURIComponent(sessionId)}/runs/${encodeURIComponent(runId)}`
+        + `/approvals/${encodeURIComponent(approvalId)}`,
+      { method: "POST", body: JSON.stringify({ decision }) },
     );
   }
 
-  cancelTask(taskId: string): Promise<CancelResponse> {
+  cancelRun(sessionId: string, runId: string): Promise<CancelResponse> {
     return this.request<CancelResponse>(
-      `/tasks/${encodeURIComponent(taskId)}/cancel`,
+      `/sessions/${encodeURIComponent(sessionId)}/runs/${encodeURIComponent(runId)}/cancel`,
       { method: "POST" },
     );
   }
 
-  getSummary(taskId: string): Promise<TaskSummary> {
-    return this.request<TaskSummary>(
-      `/tasks/${encodeURIComponent(taskId)}/summary`,
+  closeSession(sessionId: string): Promise<SessionCloseResponse> {
+    return this.request<SessionCloseResponse>(
+      `/sessions/${encodeURIComponent(sessionId)}/close`,
+      { method: "POST" },
+    );
+  }
+
+  getRunSummary(sessionId: string, runId: string): Promise<RunSummary> {
+    return this.request<RunSummary>(
+      `/sessions/${encodeURIComponent(sessionId)}/runs/${encodeURIComponent(runId)}/summary`,
+    );
+  }
+
+  listSessionHistory(): Promise<SessionHistoryList> {
+    return this.request<SessionHistoryList>("/sessions");
+  }
+
+  getSessionHistory(sessionId: string): Promise<SessionHistory> {
+    return this.request<SessionHistory>(
+      `/sessions/${encodeURIComponent(sessionId)}/history`,
     );
   }
 
@@ -139,20 +151,16 @@ export class ApiGateway implements HakoGateway {
         ...init.headers,
       },
     });
-
     if (!response.ok) {
       let message = `请求失败（HTTP ${response.status}）。`;
       try {
         const payload = (await response.json()) as ErrorEnvelope;
-        if (payload.error?.message) {
-          message = payload.error.message;
-        }
+        if (payload.error?.message) message = payload.error.message;
       } catch {
-        // HTTP 状态仍然足以生成稳定错误；不再猜测非 JSON 正文。
+        // HTTP 状态仍足以形成稳定错误。
       }
       throw new Error(message);
     }
-
     return (await response.json()) as T;
   }
 }

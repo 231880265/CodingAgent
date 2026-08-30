@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from typing import Callable
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -32,6 +33,7 @@ def build_web_agent(
     max_steps: int,
     bus: EventBus,
     approve: ApprovalCoordinator,
+    cancelled: Callable[[], bool],
 ) -> Agent:
     config = Config.from_env(workspace=workspace)
     config.max_steps = max_steps
@@ -42,6 +44,7 @@ def build_web_agent(
         config.workspace,
         config.tool_result_budget,
         extra_tools=extra_tools,
+        cancelled=cancelled,
     )
     return Agent(
         config=config,
@@ -55,21 +58,45 @@ def build_web_agent(
         ),
         bus=bus,
         approve=approve,
+        cancelled=cancelled,
     )
 
 
-def _start_payload(message: dict) -> tuple[str, Path, str, int]:
+def _attachment_context(payload: dict) -> str:
+    raw = payload.get("attachments", [])
+    if not isinstance(raw, list):
+        raise ProtocolError("attachments 必须是数组。")
+    blocks: list[str] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise ProtocolError("attachment 必须是对象。")
+        name = item.get("name")
+        media_type = item.get("mediaType")
+        content = item.get("content")
+        if not all(isinstance(value, str) and value for value in (name, media_type, content)):
+            raise ProtocolError("attachment 缺少 name、mediaType 或 content。")
+        blocks.append(
+            f"<attachment name={name!r} media_type={media_type!r}>\n"
+            f"{content}\n</attachment>"
+        )
+    return "\n\n".join(blocks)
+
+
+def _start_payload(message: dict) -> tuple[str, str, Path, str, int, str]:
     if message.get("type") != "start":
         raise ProtocolError("Worker 第一条输入必须是 start。")
     payload = message.get("payload")
     if not isinstance(payload, dict):
         raise ProtocolError("start.payload 必须是对象。")
-    task_id = payload.get("taskId")
+    session_id = payload.get("sessionId")
+    run_id = payload.get("runId")
     prompt = payload.get("prompt")
     workspace_raw = payload.get("workspace")
     max_steps = payload.get("maxSteps", 40)
-    if not isinstance(task_id, str) or not task_id:
-        raise ProtocolError("start.taskId 必须是非空字符串。")
+    if not isinstance(session_id, str) or not session_id:
+        raise ProtocolError("start.sessionId 必须是非空字符串。")
+    if not isinstance(run_id, str) or not run_id:
+        raise ProtocolError("start.runId 必须是非空字符串。")
     if not isinstance(prompt, str) or not prompt.strip():
         raise ProtocolError("start.prompt 必须是非空字符串。")
     if not isinstance(workspace_raw, str):
@@ -82,25 +109,56 @@ def _start_payload(message: dict) -> tuple[str, Path, str, int]:
         raise ProtocolError("start.workspace 必须是目录。")
     if not isinstance(max_steps, int) or isinstance(max_steps, bool) or not 1 <= max_steps <= 100:
         raise ProtocolError("start.maxSteps 必须在 1 到 100 之间。")
-    return task_id, workspace, prompt.strip(), max_steps
+    return (
+        session_id,
+        run_id,
+        workspace,
+        prompt.strip(),
+        max_steps,
+        _attachment_context(payload),
+    )
+
+
+def _run_payload(message: dict, session_id: str) -> tuple[str, str, int, str]:
+    if message.get("type") != "run":
+        raise ProtocolError("后续输入必须是 run。")
+    payload = message.get("payload")
+    if not isinstance(payload, dict):
+        raise ProtocolError("run.payload 必须是对象。")
+    if payload.get("sessionId") != session_id:
+        raise ProtocolError("run.sessionId 与当前 Session 不匹配。")
+    run_id = payload.get("runId")
+    if not isinstance(run_id, str) or not run_id:
+        raise ProtocolError("run.runId 必须是非空字符串。")
+    prompt = payload.get("prompt")
+    max_steps = payload.get("maxSteps", 40)
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ProtocolError("run.prompt 必须是非空字符串。")
+    if not isinstance(max_steps, int) or isinstance(max_steps, bool) or not 1 <= max_steps <= 100:
+        raise ProtocolError("run.maxSteps 必须在 1 到 100 之间。")
+    return run_id, prompt.strip(), max_steps, _attachment_context(payload)
 
 
 def run() -> int:
     wire_stdout = sys.stdout
     sys.stdout = sys.stderr
     writer = ProtocolWriter(wire_stdout)
-    task_id = ""
+    session_id = ""
+    run_id = ""
     try:
         writer.ready(os.getpid())
         start = read_message(sys.stdin)
-        task_id, workspace, prompt, max_steps = _start_payload(start)
+        session_id, run_id, workspace, prompt, max_steps, attachments = _start_payload(start)
 
-        incoming = ApprovalInput(sys.stdin)
+        incoming = ApprovalInput(sys.stdin, session_id=session_id)
+        incoming.begin_run(run_id)
         incoming.start()
         bus = EventBus()
-        bus.subscribe(lambda event: writer.event(task_id, event))
+        active_run = [run_id]
+        bus.subscribe(lambda event: writer.event(session_id, active_run[0], event))
         approve = ApprovalCoordinator(
-            task_id=task_id,
+            session_id=session_id,
+            run_id=run_id,
             writer=writer,
             incoming=incoming,
         )
@@ -109,15 +167,22 @@ def run() -> int:
             max_steps=max_steps,
             bus=bus,
             approve=approve,
+            cancelled=incoming.is_cancelled,
         )
-        result = agent.run(prompt)
-        writer.task_message("result", task_id, result_payload(result))
-        return 0
+        while True:
+            agent.config.max_steps = max_steps
+            active_run[0] = run_id
+            approve.begin_run(run_id)
+            result = agent.run(prompt, attachment_context=attachments)
+            writer.run_message("result", session_id, run_id, result_payload(result))
+            follow_up = incoming.next_goal()
+            run_id, prompt, max_steps, attachments = _run_payload(follow_up, session_id)
     except ProtocolError as exc:
-        if task_id:
-            writer.task_message(
+        if session_id and run_id:
+            writer.run_message(
                 "fatal",
-                task_id,
+                session_id,
+                run_id,
                 {"code": "WORKER_PROTOCOL_ERROR", "message": redact(str(exc))},
             )
         else:
@@ -125,10 +190,11 @@ def run() -> int:
         return 2
     except SystemExit as exc:
         message = redact(str(exc)) or "无法构造 Agent。"
-        if task_id:
-            writer.task_message(
+        if session_id and run_id:
+            writer.run_message(
                 "fatal",
-                task_id,
+                session_id,
+                run_id,
                 {"code": "AGENT_BUILD_FAILED", "message": message},
             )
         else:
@@ -136,10 +202,11 @@ def run() -> int:
         return 3
     except BaseException as exc:  # noqa: BLE001 - Worker 顶层故障必须结构化收口
         message = redact(f"{type(exc).__name__}: {exc}")
-        if task_id:
-            writer.task_message(
+        if session_id and run_id:
+            writer.run_message(
                 "fatal",
-                task_id,
+                session_id,
+                run_id,
                 {"code": "WORKER_ERROR", "message": message},
             )
         else:

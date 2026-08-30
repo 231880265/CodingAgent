@@ -16,7 +16,7 @@
 - Verified Finish：区分只读完成、已验证完成和未验证修改
 - 可选只读 subagent：独立短上下文，仅能列目录/读文件，主 Agent 保留唯一写入与验证权
 - 事件总线和 inline TUI，兼容 Windows / Linux
-- 本地 Web 控制台：Vue 3 + Vant 4 前端、Spring Boot REST/SSE 控制面、每任务一个 Python Worker；支持任务提交、刷新恢复、分级审批、取消和 Verified Finish 证据摘要
+- 本地 Web 控制台：Vue 3 + Vant 4 前端、Spring Boot REST/SSE 控制面；每个 Session 独占一个 Python Worker，同一 Session 可连续执行多个 Run 并共享 Agent + Conversation；支持文本附件、分级审批、仅取消当前 Run、独立新会话、SQLite 只读历史和 Verified Finish 证据摘要
 
 2026-08-27 已用硅基流动 `deepseek-ai/DeepSeek-V4-Flash` 在隔离的临时 Git 仓库完成最新版真实多轮验证：
 
@@ -24,9 +24,9 @@
 list_dir → read_file × 2 → edit_file → pytest -q (exit=0) → DONE_VERIFIED
 ```
 
-初始测试为 `2 failed, 1 passed`，Agent 只把折扣公式中的 `1 + percent / 100` 改为 `1 - percent / 100`，测试文件没有变化；内核根据修改后的 `pytest` 成功证据输出 `DONE_VERIFIED`，独立复测为 `3 passed`。本次运行共 5 个模型回合、9,662 tokens、约 51.3 秒。它证明 `edit_file`、真实 tool calling 和 Verified Finish 能端到端闭合；单个样例不能代表任务成功率，后续仍需评测集和消融实验。
+初始测试为 `2 failed, 1 passed`，Agent 只把折扣公式中的 `1 + percent / 100` 改为 `1 - percent / 100`，测试文件没有变化；内核根据修改后的 `pytest` 成功证据输出 `DONE_VERIFIED`，独立复测为 `3 passed`。本次运行共 5 次模型决策、9,662 tokens、约 51.3 秒。它证明 `edit_file`、真实 tool calling 和 Verified Finish 能端到端闭合；单个样例不能代表任务成功率，后续仍需评测集和消融实验。
 
-完整设计辩护见 [DESIGN.md](DESIGN.md)，时间线与待办见 [PROJECT_STATUS.md](PROJECT_STATUS.md)。Web 需求、接口和最终联调记录见 [docs/WEB_CONSOLE_REQUIREMENTS.md](docs/WEB_CONSOLE_REQUIREMENTS.md)、[docs/WEB_CONSOLE_API.md](docs/WEB_CONSOLE_API.md) 与 [docs/WEB_BACKEND_COMPLETION.md](docs/WEB_BACKEND_COMPLETION.md)。
+完整设计辩护见 [DESIGN.md](DESIGN.md)，时间线与待办见 [PROJECT_STATUS.md](PROJECT_STATUS.md)。Web 的 P0/P1 Session/Run 架构见 [docs/WEB_SESSION_RUN_ARCHITECTURE.md](docs/WEB_SESSION_RUN_ARCHITECTURE.md)，需求、接口和联调记录见 [docs/WEB_CONSOLE_REQUIREMENTS.md](docs/WEB_CONSOLE_REQUIREMENTS.md)、[docs/WEB_CONSOLE_API.md](docs/WEB_CONSOLE_API.md) 与 [docs/WEB_BACKEND_COMPLETION.md](docs/WEB_BACKEND_COMPLETION.md)。
 
 ## 快速开始
 
@@ -74,7 +74,7 @@ SILICONFLOW_API_KEY=
 .\start-web.ps1 -Mode Fake
 ```
 
-脚本会检查 Java、Node.js 和 Python 虚拟环境，首次运行自动执行 `npm install`，然后在当前终端并行启动两个服务。打开 `http://127.0.0.1:5173`；按 `Ctrl+C` 会同时回收前后端进程。只检查环境而不启动可执行 `.\start-web.ps1 -CheckOnly`。
+脚本会检查 Java、Node.js 和 Python 虚拟环境，首次运行自动执行 `npm install`。它先等待后端健康状态达到 `UP`，再启动并确认前端可访问，避免浏览器在 Spring Boot 尚未就绪时得到 HTTP 502；端口已占用、服务提前退出或就绪超时都会给出明确错误并回收本次启动的进程树。看到两个 `ready` 后打开 `http://127.0.0.1:5173`；按 `Ctrl+C` 会同时回收前后端进程。只检查环境而不启动可执行 `.\start-web.ps1 -CheckOnly`。
 
 需要分别观察或调试两个服务时，也可以手动启动。第一个 PowerShell 启动后端：
 
@@ -104,7 +104,7 @@ npm run dev
 | `-C, --workspace` | 指定工作区；文件工具只允许访问该目录内部 |
 | `-v, --verbose` | 展开工具结果与上下文统计 |
 | `-y, --yes` | 自动批准普通写入和命令；高风险命令仍需逐次确认 |
-| `--max-steps` | 覆盖默认 40 回合上限 |
+| `--max-steps` | 覆盖默认 40 次模型决策上限 |
 
 ## 运行机制
 
@@ -150,12 +150,12 @@ web/
 
 - `edit_file` 只执行唯一匹配的局部替换；0 匹配返回候选，多匹配拒绝猜测，`write_file` 仍用于新文件或小文件整体重写。
 - 文件工具会校验路径不能逃出工作区；`run_command` 只固定工作目录并观察命令前后净变化，不是操作系统沙箱。
-- Windows 上 bare `pytest` 由工具自动绑定到启动 hako 的当前 Python，验证证据保存实际 `-m pytest` 命令。
+- Windows 上 bare `pytest` 由工具自动绑定到启动 hako 的当前 Python；验证注册表同时覆盖常见 Python/Node/Rust/Go/.NET/Java 测试，以及 C/C++、Java 和主流构建工具。
 - 库调用默认拒绝有副作用工具；普通写入/命令可逐次批准或由 `-y` 放行，高风险命令永远逐次确认，非交互环境即使有 `-y` 也拒绝高风险命令。
-- 修改后必须在最后一次写入之后运行受认可且退出码为 0 的单一测试、构建或检查命令；否则只能得到 `DONE_UNVERIFIED`，CLI 返回失败。
+- 修改后必须在最后一次业务文件写入之后运行受认可且退出码为 0 的单一测试、构建或检查命令；否则只能得到 `DONE_UNVERIFIED`，CLI 返回失败。`.exe/.class/.jar` 与常见构建目录会作为派生产物展示和审计，但不会反向清空刚成功的构建证据。
 - 当前只做陈旧读取失效与单条工具输出截断，尚未实现长对话 compaction。
 - shell 审计只能观察命令结束时的净变化：同一命令内创建后删除、工作区外副作用及并发进程归因不在证明范围；`.git/.venv/node_modules/tmp` 与常见测试缓存会剪枝。
-- 高风险识别是保守的词法门禁，不是完整 shell 语法分析；同一回合的工具调用目前串行执行。
+- 高风险识别是保守的词法门禁，不是完整 shell 语法分析；同一次模型决策返回的多个工具调用目前串行执行。
 - 本地三场景评测的最大主上下文仅为 0.6241%，list/read 累计执行占墙钟不足 0.1%，因此当前没有为演示而实现 compaction 或工具并发。
 - 只读 subagent 的真实模型机制探针能在 4 步内返回跨文件证据且零写入，但两次自然 EAGLE 运行都未调用它，所以尚无自主采用或性能收益结论。
 
@@ -168,7 +168,7 @@ web/
 
 测试覆盖配置选择、路径逃逸、参数修补、上下文失效、截断、终止条件、事件流、CLI 和跨平台行为。GitHub Actions 在 Windows 与 Ubuntu 上使用 Python 3.12 运行同一套测试。真实模型 smoke test 不放进 CI，避免泄露密钥、产生费用和引入外部服务波动。
 
-2026-08-28 最新回归：Python `174 passed, 1 skipped`；Spring Boot `13 passed`；前端 `npm run build` 通过 TypeScript 检查并转换 299 个模块。另用浏览器在 API 模式完成创建任务、SSE、刷新恢复、两次审批与 Verified Finish 摘要。Fake Worker 和本地故障标本不代表真实模型成功率。
+2026-08-29 最新回归：Python `191 passed, 1 skipped`；Spring Boot `15 passed`；前端 `npm run build` 通过 TypeScript 检查并转换 303 个模块。浏览器另在 `1280×720` 与 `1024×700` 验证页面无外层滚动，并走通同 Session 三个 Run、取消本轮后继续、活动 Run 切换新会话、附件/工作区语义分离及 CLOSED 历史只读复盘。Fake Worker 和本地故障标本不代表真实模型成功率。
 
 ## 下一阶段
 

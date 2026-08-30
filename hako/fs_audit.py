@@ -36,6 +36,37 @@ IGNORED_DIRECTORY_NAMES = frozenset(
 )
 IGNORED_FILE_SUFFIXES = frozenset({".pyc", ".pyo"})
 
+# 这些文件仍进入 touched_paths，供审计与 UI 展示；只是另外标记为派生产物，
+# 不让编译本身看起来像“编译后又改了一次源码”。列表故意保守，只覆盖常见、
+# 语义明确的编译产物；无法确认的文件继续按普通变更处理。
+DERIVED_DIRECTORY_NAMES = frozenset(
+    {
+        "build",
+        "dist",
+        "out",
+        "target",
+        "obj",
+        ".gradle",
+    }
+)
+DERIVED_FILE_SUFFIXES = frozenset(
+    {
+        ".exe",
+        ".dll",
+        ".so",
+        ".dylib",
+        ".o",
+        ".obj",
+        ".a",
+        ".lib",
+        ".class",
+        ".jar",
+        ".war",
+        ".ear",
+        ".pdb",
+    }
+)
+
 # 小型源码做内容摘要，能识别“同大小且恢复了 mtime”的覆盖；大文件只比较
 # size/mtime/mode，避免每次测试命令都读取模型权重或大型数据集。
 MAX_HASH_BYTES = 1_000_000
@@ -67,6 +98,10 @@ class FileEffects:
         return tuple(sorted(set(self.created) | set(self.modified) | set(self.deleted)))
 
     @property
+    def derived_paths(self) -> tuple[str, ...]:
+        return tuple(path for path in self.touched_paths if is_derived_path(path))
+
+    @property
     def changed(self) -> bool:
         return bool(self.created or self.modified or self.deleted)
 
@@ -96,6 +131,18 @@ class FileEffects:
         if not lines:
             return ""
         return "[hako] shell 文件副作用（命令前后净变化）：\n" + "\n".join(lines)
+
+
+def is_derived_path(raw: str) -> bool:
+    """保守识别常见构建产物；不把普通源码、测试和配置文件误排除。"""
+    path = Path(raw)
+    lowered_parts = {part.lower() for part in path.parts[:-1]}
+    name = path.name.lower()
+    return (
+        bool(lowered_parts & DERIVED_DIRECTORY_NAMES)
+        or path.suffix.lower() in DERIVED_FILE_SUFFIXES
+        or name == "a.out"
+    )
 
 
 def snapshot_workspace(root: Path) -> WorkspaceSnapshot:

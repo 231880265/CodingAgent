@@ -2,167 +2,98 @@
 import { computed } from "vue";
 import type { HakoEvent, StopReason } from "../types/api";
 import {
-  EVENT_LABELS,
-  STATUS_LABELS,
   STOP_REASON_LABELS,
   formatTime,
-  formatTokens,
   formatToolName,
   readPayload,
 } from "../utils/presentation";
+import MarkdownContent from "./MarkdownContent.vue";
 
 const props = defineProps<{
   event: HakoEvent;
+  notes?: HakoEvent[];
 }>();
-
-const isCompact = computed(() =>
-  ["turn_started", "context_stats", "task_status", "approval_resolved"].includes(
-    props.event.type,
-  ),
-);
-
+const reason = computed(() => readPayload(props.event.payload, "reason") as StopReason | undefined);
+const isAgentNote = computed(() => props.event.type === "assistant_text");
+const isUserMessage = computed(() => props.event.type === "run_started");
 const variant = computed(() => {
   if (["agent_error", "worker_error"].includes(props.event.type)) return "error";
-  if (
-    props.event.type === "tool_call_finished" &&
-    readPayload(props.event.payload, "ok") === false
-  ) {
-    return "error";
-  }
-  if (
-    [
-      "verification_required",
-      "continuation_required",
-      "approval_required",
-      "stream_gap",
-    ].includes(props.event.type)
-  ) {
-    return "warning";
-  }
-  if (
-    props.event.type === "task_result" &&
-    readPayload(props.event.payload, "success") === true
-  ) {
-    return "success";
-  }
+  if (["verification_required", "continuation_required", "approval_required", "stream_gap"].includes(props.event.type)) return "warning";
+  if (props.event.type === "run_finished" && reason.value === "done_verified") return "success";
   return "neutral";
 });
-
 const marker = computed(() => {
   if (variant.value === "error") return "×";
   if (variant.value === "warning") return "!";
   if (variant.value === "success") return "✓";
-  if (props.event.type.startsWith("tool_call")) return "›";
-  if (props.event.type === "assistant_text") return "a";
   return "·";
 });
-
 const title = computed(() => {
-  const payload = props.event.payload;
-  if (props.event.type === "tool_call_started") {
-    return `${formatToolName(readPayload(payload, "name"))}开始`;
-  }
-  if (props.event.type === "tool_call_finished") {
-    return formatToolName(readPayload(payload, "name"));
-  }
-  if (props.event.type === "turn_started") {
-    return `第 ${readPayload(payload, "step") ?? "?"} 轮`;
-  }
-  return EVENT_LABELS[props.event.type];
-});
-
-const summary = computed(() => {
-  const payload = props.event.payload;
   switch (props.event.type) {
-    case "run_started":
-      return String(readPayload(payload, "model") ?? "模型未报告");
-    case "tool_call_started":
-      return argumentSubject(readPayload(payload, "args"));
-    case "tool_call_finished":
-      return String(readPayload(payload, "summary") ?? "工具已返回");
-    case "context_stats":
-      return `${formatTokens(numberValue(readPayload(payload, "usedTokens")))} / ${formatTokens(numberValue(readPayload(payload, "limit")))} tokens`;
-    case "task_status": {
-      const current = String(readPayload(payload, "current") ?? "");
-      return STATUS_LABELS[current as keyof typeof STATUS_LABELS] ?? current;
-    }
-    case "approval_required": {
-      const tool = readPayload(payload, "tool");
-      return formatToolName(readPayload(tool, "name"));
-    }
-    case "approval_resolved":
-      return decisionLabel(readPayload(payload, "decision"));
-    case "run_finished": {
-      const reason = readPayload(payload, "reason") as StopReason | undefined;
-      return reason ? STOP_REASON_LABELS[reason] : "内核已停止";
-    }
-    case "task_result":
-      return readPayload(payload, "success") === true
-        ? "Verified Finish"
-        : "任务未满足完成条件";
-    case "subagent_finished":
-      return `${readPayload(payload, "steps") ?? 0} 步 · ${formatTokens(numberValue(readPayload(payload, "totalTokens")))} tokens`;
-    default:
-      return "";
+    case "assistant_text": return "正在决定下一步";
+    case "verification_required": return "完成证据不足，继续验证";
+    case "continuation_required": return "回答尚未形成行动，继续执行";
+    case "approval_required": return "等待你的批准";
+    case "subagent_started": return "只读调查开始";
+    case "subagent_finished": return "只读调查完成";
+    case "run_finished":
+      if (reason.value === "done_verified") return "完成检查通过";
+      if (reason.value === "done_read_only") return "只读任务已完成";
+      if (reason.value === "done_unverified") return "任务结束，但验证不足";
+      return "任务已停止";
+    case "run_cancelled": return "本轮已取消";
+    case "agent_error": return "Agent 运行错误";
+    case "worker_error": return "Worker 运行错误";
+    case "stream_gap": return "事件流存在缺口";
+    default: return "状态更新";
   }
 });
-
+const summary = computed(() => {
+  if (props.event.type === "approval_required") {
+    return formatToolName(readPayload(readPayload(props.event.payload, "tool"), "name"));
+  }
+  if (props.event.type === "run_finished" && reason.value) return STOP_REASON_LABELS[reason.value];
+  if (props.event.type === "subagent_finished") return `${readPayload(props.event.payload, "steps") ?? 0} 次模型决策`;
+  return "";
+});
 const body = computed(() => {
-  const payload = props.event.payload;
-  if (props.event.type === "assistant_text") {
-    return stringValue(readPayload(payload, "text"));
+  if (props.event.type === "run_started") return stringValue(readPayload(props.event.payload, "task"));
+  if (["agent_error", "worker_error", "run_cancelled", "stream_gap"].includes(props.event.type)) {
+    return stringValue(readPayload(props.event.payload, "message"));
   }
-  if (
-    [
-      "verification_required",
-      "continuation_required",
-      "agent_error",
-      "worker_error",
-      "task_cancelled",
-      "stream_gap",
-    ].includes(props.event.type)
-  ) {
-    return stringValue(readPayload(payload, "message"));
+  if (props.event.type === "subagent_started") return stringValue(readPayload(props.event.payload, "task"));
+  if (props.event.type === "verification_required") {
+    return "最后一次文件修改后还没有成功验证；hako 不接受模型直接宣布完成。";
   }
-  if (props.event.type === "subagent_started") {
-    return stringValue(readPayload(payload, "task"));
+  if (props.event.type === "continuation_required") {
+    return "上一条回复没有产生工具行动，内核要求 Agent 继续执行。";
   }
+  if (isAgentNote.value) return preview(modelNotes.value);
   return "";
 });
-
-const detail = computed(() => {
-  if (props.event.type === "tool_call_finished") {
-    return stringValue(readPayload(props.event.payload, "detail"));
-  }
-  if (props.event.type === "tool_call_started") {
-    const args = readPayload(props.event.payload, "args");
-    return args ? JSON.stringify(args, null, 2) : "";
-  }
-  return "";
+const modelNotes = computed(() => {
+  const events = [
+    ...(props.notes ?? []),
+    ...(isAgentNote.value ? [props.event] : []),
+  ];
+  return events
+    .map((event) => stringValue(readPayload(event.payload, "text")))
+    .filter(Boolean)
+    .join("\n\n");
+});
+const fullMessage = computed(() => isAgentNote.value
+  ? ""
+  : stringValue(readPayload(props.event.payload, "message")));
+const runMetadata = computed(() => {
+  if (!isUserMessage.value) return "";
+  const model = stringValue(readPayload(props.event.payload, "model"));
+  const cwd = stringValue(readPayload(props.event.payload, "cwd"));
+  return [model && `模型：${model}`, cwd && `工作区：${cwd}`].filter(Boolean).join("\n");
 });
 
-const duration = computed(() => {
-  const value = numberValue(readPayload(props.event.payload, "durationMs"));
-  return value == null ? "" : `${value} ms`;
-});
-
-function argumentSubject(args: unknown): string {
-  const command = readPayload(args, "command");
-  if (typeof command === "string") return command;
-  const path = readPayload(args, "path");
-  if (typeof path === "string") return path;
-  return "参数已提交";
-}
-
-function decisionLabel(value: unknown): string {
-  if (value === "ALLOW_ONCE") return "允许这一次";
-  if (value === "ALLOW_SESSION") return "本任务同类允许";
-  if (value === "DENY") return "已拒绝";
-  return "审批已处理";
-}
-
-function numberValue(value: unknown): number | null {
-  return typeof value === "number" ? value : null;
+function preview(value: string): string {
+  const compact = value.replace(/\s+/g, " ").trim();
+  return compact.length > 120 ? `${compact.slice(0, 120)}…` : compact;
 }
 
 function stringValue(value: unknown): string {
@@ -171,9 +102,25 @@ function stringValue(value: unknown): string {
 </script>
 
 <template>
+  <article v-if="isUserMessage" class="user-message">
+    <div class="user-prompt-block">
+      <header class="user-role">
+        <strong>你</strong>
+        <time :datetime="event.occurredAt">{{ formatTime(event.occurredAt) }}</time>
+      </header>
+      <MarkdownContent :content="body" />
+      <details v-if="runMetadata" class="run-diagnostics">
+        <summary>运行环境</summary>
+        <pre>{{ runMetadata }}</pre>
+      </details>
+    </div>
+    <span class="user-avatar" aria-hidden="true">你</span>
+  </article>
+
   <article
+    v-else
     class="timeline-event"
-    :class="{ 'is-compact': isCompact }"
+    :class="{ 'is-secondary': isAgentNote }"
     :data-variant="variant"
   >
     <div class="event-marker" aria-hidden="true">{{ marker }}</div>
@@ -183,17 +130,16 @@ function stringValue(value: unknown): string {
           <strong>{{ title }}</strong>
           <span v-if="summary" class="event-summary">{{ summary }}</span>
         </div>
-        <div class="event-meta">
-          <span v-if="duration">{{ duration }}</span>
-          <time :datetime="event.occurredAt">{{ formatTime(event.occurredAt) }}</time>
-        </div>
+        <time class="event-meta" :datetime="event.occurredAt">{{ formatTime(event.occurredAt) }}</time>
       </header>
-
       <p v-if="body" class="event-body">{{ body }}</p>
-
-      <details v-if="detail" class="event-detail" :open="variant === 'error'">
-        <summary>{{ event.type === "tool_call_started" ? "查看参数" : "查看结果" }}</summary>
-        <pre>{{ detail }}</pre>
+      <details v-if="modelNotes" class="event-detail model-note-detail">
+        <summary>{{ isAgentNote ? "展开完整模型说明" : "查看模型说明" }}</summary>
+        <MarkdownContent :content="modelNotes" />
+      </details>
+      <details v-if="fullMessage" class="event-detail">
+        <summary>查看内核原文</summary>
+        <pre>{{ fullMessage }}</pre>
       </details>
     </div>
   </article>

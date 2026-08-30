@@ -36,7 +36,38 @@ def test_snapshot_distinguishes_create_modify_delete_and_ignores_caches(
     assert effects.modified == ("changed.py",)
     assert effects.deleted == ("deleted.txt",)
     assert effects.touched_paths == ("changed.py", "created.py", "deleted.txt")
+    assert effects.derived_paths == ()
     assert effects.summary == "files +1 ~1 -1"
+
+
+def test_build_outputs_are_audited_but_classified_as_derived(workspace: Path):
+    before = snapshot_workspace(workspace)
+    (workspace / "qsort.exe").write_bytes(b"binary")
+    classes = workspace / "build" / "classes"
+    classes.mkdir(parents=True)
+    (classes / "Main.class").write_bytes(b"bytecode")
+    (workspace / "notes.txt").write_text("authored\n", encoding="utf-8")
+
+    effects = diff_snapshots(before, snapshot_workspace(workspace))
+
+    assert effects.touched_paths == (
+        "build/classes/Main.class",
+        "notes.txt",
+        "qsort.exe",
+    )
+    assert effects.derived_paths == ("build/classes/Main.class", "qsort.exe")
+
+
+def test_bin_source_script_is_not_assumed_to_be_generated(workspace: Path):
+    before = snapshot_workspace(workspace)
+    script = workspace / "bin" / "release.ps1"
+    script.parent.mkdir(parents=True)
+    script.write_text("Write-Output 'release'\n", encoding="utf-8")
+
+    effects = diff_snapshots(before, snapshot_workspace(workspace))
+
+    assert effects.touched_paths == ("bin/release.ps1",)
+    assert effects.derived_paths == ()
 
 
 def test_small_file_digest_catches_same_size_change_with_restored_mtime(

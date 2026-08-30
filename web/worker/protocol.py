@@ -35,6 +35,13 @@ _EVENT_FIELDS: dict[str, tuple[str, ...]] = {
         "summary",
         "detail",
         "duration_ms",
+        "touched_paths",
+        "created_paths",
+        "modified_paths",
+        "deleted_paths",
+        "derived_paths",
+        "verification_kind",
+        "verification_command",
     ),
     "context_stats": ("used_tokens", "limit", "message_count"),
     "verification_required": ("changed_paths", "message"),
@@ -160,7 +167,7 @@ def read_message(stream: TextIO) -> dict[str, Any]:
 
 
 class ProtocolWriter:
-    """唯一可写 stdout 的组件，并串行分配任务级 sequence。"""
+    """唯一可写 stdout 的组件，并为整个 Session 串行分配 sequence。"""
 
     def __init__(self, stream: TextIO) -> None:
         self._stream = stream
@@ -173,14 +180,15 @@ class ProtocolWriter:
                 "protocolVersion": PROTOCOL_VERSION,
                 "type": "ready",
                 "workerPid": worker_pid,
-                "capabilities": ["events", "approval", "run_result"],
+                "capabilities": ["events", "approval", "run_result", "multi_run"],
             }
         )
 
-    def task_message(
+    def run_message(
         self,
         message_type: str,
-        task_id: str,
+        session_id: str,
+        run_id: str,
         payload: dict[str, Any],
     ) -> None:
         with self._lock:
@@ -188,16 +196,17 @@ class ProtocolWriter:
             message = {
                 "protocolVersion": PROTOCOL_VERSION,
                 "type": message_type,
-                "taskId": task_id,
+                "sessionId": session_id,
+                "runId": run_id,
                 "sequence": self._sequence,
                 "occurredAt": utc_now(),
                 "payload": _json_value(payload),
             }
             self._write_unlocked(message)
 
-    def event(self, task_id: str, event: ev.Event) -> None:
+    def event(self, session_id: str, run_id: str, event: ev.Event) -> None:
         kind, data = event_payload(event)
-        self.task_message("event", task_id, {"kind": kind, "data": data})
+        self.run_message("event", session_id, run_id, {"kind": kind, "data": data})
 
     def _write(self, message: dict[str, Any]) -> None:
         with self._lock:

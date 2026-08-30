@@ -7,9 +7,9 @@
 from __future__ import annotations
 
 import sys
+import threading
+import time
 from pathlib import Path
-from types import SimpleNamespace
-
 import pytest
 
 from hako.tools import Registry
@@ -68,9 +68,18 @@ def test_run_command_records_the_normalized_windows_pytest(
 ):
     captured: dict[str, object] = {}
 
-    def fake_run(argv, **kwargs):
+    class FakeProcess:
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            return "1 passed\n", ""
+
+        def poll(self):
+            return self.returncode
+
+    def fake_popen(argv, **kwargs):
         captured["argv"] = argv
-        return SimpleNamespace(returncode=0, stdout="1 passed\n", stderr="")
+        return FakeProcess()
 
     monkeypatch.setattr(shell_module.sys, "platform", "win32")
     monkeypatch.setattr(
@@ -78,7 +87,7 @@ def test_run_command_records_the_normalized_windows_pytest(
         "executable",
         r"C:\work\.venv\Scripts\python.exe",
     )
-    monkeypatch.setattr(shell_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(shell_module.subprocess, "Popen", fake_popen)
     registry = Registry([make_run_command(workspace)])
 
     result = run(registry, "pytest -q")
@@ -143,6 +152,28 @@ def test_timeout_is_reported_as_recoverable(registry: Registry, workspace: Path)
     assert result.touched_paths == ("partial.txt",)
 
 
+def test_cancel_stops_only_the_current_command_tree(workspace: Path):
+    (workspace / "sleep.py").write_text(
+        "import time\ntime.sleep(30)\n",
+        encoding="utf-8",
+    )
+    cancelled = threading.Event()
+    timer = threading.Timer(0.25, cancelled.set)
+    registry = Registry([make_run_command(workspace, cancelled=cancelled.is_set)])
+
+    started = time.monotonic()
+    timer.start()
+    try:
+        result = run(registry, py("sleep.py"), timeout=20)
+    finally:
+        timer.cancel()
+
+    assert not result.ok
+    assert "cancelled" in result.summary
+    assert time.monotonic() - started < 5
+    assert result.touched_paths == ()
+
+
 def test_run_command_reports_created_modified_and_deleted_files(
     registry: Registry, workspace: Path
 ):
@@ -166,6 +197,7 @@ def test_run_command_reports_created_modified_and_deleted_files(
     assert result.modified_paths == ("changed.txt",)
     assert result.deleted_paths == ("deleted.txt",)
     assert result.touched_paths == ("changed.txt", "created.txt", "deleted.txt")
+    assert result.derived_paths == ()
     assert "files +1 ~1 -1" in result.summary
     assert "shell 文件副作用" in result.detail
     assert ".pytest_cache" not in result.detail
@@ -222,11 +254,20 @@ def test_cwd_is_workspace(registry: Registry, workspace: Path):
     [
         ("pytest -q", "test"),
         ("python -m pytest tests/test_loop.py", "test"),
+        (r"..\.venv\Scripts\python.exe -B -m pytest tests/test_loop.py -v", "test"),
         (r".\.venv\Scripts\python.exe -m unittest", "test"),
         ("npm run test -- --runInBand", "test"),
         ("cargo test --workspace", "test"),
+        ("ctest --output-on-failure", "test"),
+        ("java -jar junit-platform-console-standalone.jar --scan-classpath", "test"),
         ("npm run build", "build"),
         ("python -m compileall -q src", "build"),
+        ("python -B -m compileall -q src", "build"),
+        ("g++ -Wall qsort.cpp -o qsort.exe", "build"),
+        ("clang++ src/main.cc -o app", "build"),
+        ("cl.exe /EHsc qsort.cpp", "build"),
+        ("javac -d out src/Main.java", "build"),
+        ("cmake --build build --config Release", "build"),
         ("ruff check .", "check"),
     ],
 )
@@ -242,6 +283,9 @@ def test_verification_commands_are_classified(command: str, kind: str):
         "pytest -q || true",
         "pytest -q; exit 0",
         "pytest -q | Select-Object -Last 1",
+        "g++ --version",
+        "ctest -N",
+        "java Main",
     ],
 )
 def test_non_evidence_commands_are_rejected(command: str):

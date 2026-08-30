@@ -204,6 +204,64 @@ def test_successful_check_after_last_write_is_verified(
     assert result.verification[0].step == 2
 
 
+def test_build_artifact_does_not_invalidate_the_build_evidence(
+    config, registry, bus, workspace: Path
+):
+    """真实 C++ 场景：源码是交付变更，exe 是可审计产物，不是新一轮源码修改。"""
+    tool = registry.get("run_command")
+    assert tool is not None
+
+    def compile_ok(command: str, timeout: int = 60) -> ToolResult:
+        (workspace / "qsort.exe").write_bytes(b"compiled")
+        return ToolResult(
+            ok=True,
+            detail="exit=0\ncompiled",
+            summary=f"{command}  exit=0 · files +1 ~0 -0",
+            touched_paths=("qsort.exe",),
+            created_paths=("qsort.exe",),
+            derived_paths=("qsort.exe",),
+            verification_kind="build",
+            verification_command=command,
+        )
+
+    tool.handler = compile_ok
+    finished: list[ToolCallFinished] = []
+    bus.subscribe(
+        lambda event: finished.append(event)
+        if isinstance(event, ToolCallFinished)
+        else None
+    )
+    agent, _ = agent_with(
+        [
+            reply(
+                "",
+                [
+                    call(
+                        "write_file",
+                        {"path": "qsort.cpp", "content": "int main() { return 0; }\n"},
+                    )
+                ],
+            ),
+            reply(
+                "",
+                [call("run_command", {"command": "g++ qsort.cpp -o qsort.exe"})],
+            ),
+            reply("编译验证完成"),
+        ],
+        config,
+        registry,
+        bus,
+    )
+
+    result = agent.run("编写并验证 C++ 程序")
+
+    assert result.reason is StopReason.DONE_VERIFIED
+    assert result.changed_paths == ("qsort.cpp",)
+    assert result.verification[0].kind == "build"
+    assert finished[-1].derived_paths == ("qsort.exe",)
+    assert finished[-1].verification_kind == "build"
+
+
 def test_failed_check_does_not_verify(config, registry, bus):
     fake_verifier(registry, [False])
     agent, _ = agent_with(
@@ -372,19 +430,148 @@ def test_signature_ignores_key_order(config, registry, bus, workspace: Path):
     assert agent.run("t").reason is StopReason.STUCK
 
 
-# ------------------------------------------------------------------ DENIED
-
-
-def test_user_denial_terminates_without_executing(config, registry, bus, workspace: Path):
-    """人的决定不重试。"""
+def test_successful_edit_starts_a_new_stuck_detection_phase(
+    config, registry, bus, workspace: Path
+):
+    """同一文件在真实修改后是新状态，允许重新读取确认。"""
+    (workspace / "a.py").write_text("value = 1\n", encoding="utf-8")
+    fake_verifier(registry, [True])
+    read = lambda call_id: call("read_file", {"path": "a.py"}, call_id=call_id)
     agent, _ = agent_with(
-        [reply("", [call("write_file", {"path": "x.py", "content": "boom"})])],
+        [
+            reply("", [read("r1")]),
+            reply("", [read("r2")]),
+            reply(
+                "",
+                [
+                    call(
+                        "edit_file",
+                        {
+                            "path": "a.py",
+                            "old_text": "value = 1",
+                            "new_text": "value = 2",
+                        },
+                        call_id="e1",
+                    )
+                ],
+            ),
+            reply("", [read("r3")]),
+            reply("", [call("run_command", {"command": "pytest -q"})]),
+            reply("已修改并验证"),
+        ],
+        config,
+        registry,
+        bus,
+    )
+
+    result = agent.run("修改后重新读取并验证")
+
+    assert result.reason is StopReason.DONE_VERIFIED
+    assert (workspace / "a.py").read_text(encoding="utf-8") == "value = 2\n"
+
+
+def test_failed_edit_does_not_reset_stuck_detection(
+    config, registry, bus, workspace: Path
+):
+    """失败且没有文件副作用的编辑不是进展，第三次相同读取仍应止损。"""
+    (workspace / "a.py").write_text("value = 1\n", encoding="utf-8")
+    read = lambda call_id: call("read_file", {"path": "a.py"}, call_id=call_id)
+    agent, _ = agent_with(
+        [
+            reply("", [read("r1")]),
+            reply("", [read("r2")]),
+            reply(
+                "",
+                [
+                    call(
+                        "edit_file",
+                        {
+                            "path": "a.py",
+                            "old_text": "missing = 0",
+                            "new_text": "value = 2",
+                        },
+                        call_id="e1",
+                    )
+                ],
+            ),
+            reply("", [read("r3")]),
+        ],
+        config,
+        registry,
+        bus,
+    )
+
+    result = agent.run("失败编辑后仍重复读取")
+
+    assert result.reason is StopReason.STUCK
+    assert (workspace / "a.py").read_text(encoding="utf-8") == "value = 1\n"
+
+
+def test_run_command_file_effect_starts_a_new_stuck_detection_phase(
+    config, registry, bus, workspace: Path
+):
+    """shell 即使退出非零，只要产生净文件变化，也已经进入新工作区状态。"""
+    (workspace / "a.py").write_text("value = 1\n", encoding="utf-8")
+    tool = registry.get("run_command")
+    assert tool is not None
+
+    def command_with_effect(command: str, timeout: int = 60) -> ToolResult:
+        if command == "python mutate.py":
+            (workspace / "a.py").write_text("value = 2\n", encoding="utf-8")
+            return ToolResult(
+                ok=False,
+                detail="exit=1\nmutation happened before failure",
+                summary="python mutate.py  exit=1 · files +0 ~1 -0",
+                touched_paths=("a.py",),
+                modified_paths=("a.py",),
+            )
+        return ToolResult(
+            ok=True,
+            detail="exit=0\n1 passed",
+            summary=f"{command}  exit=0",
+            verification_kind="test",
+            verification_command=command,
+        )
+
+    tool.handler = command_with_effect
+    read = lambda call_id: call("read_file", {"path": "a.py"}, call_id=call_id)
+    agent, _ = agent_with(
+        [
+            reply("", [read("r1")]),
+            reply("", [read("r2")]),
+            reply("", [call("run_command", {"command": "python mutate.py"})]),
+            reply("", [read("r3")]),
+            reply("", [call("run_command", {"command": "pytest -q"})]),
+            reply("已确认并验证"),
+        ],
+        config,
+        registry,
+        bus,
+    )
+
+    result = agent.run("命令修改文件后重新读取")
+
+    assert result.reason is StopReason.DONE_VERIFIED
+    assert (workspace / "a.py").read_text(encoding="utf-8") == "value = 2\n"
+
+
+# ------------------------------------------------------- APPROVAL OBSERVATION
+
+
+def test_user_denial_is_observation_without_executing(config, registry, bus, workspace: Path):
+    """拒绝一次工具调用不等于取消 Run；模型仍可给出只读结论。"""
+    agent, _ = agent_with(
+        [
+            reply("", [call("write_file", {"path": "x.py", "content": "boom"})]),
+            reply("写入被拒绝，未修改工作区"),
+        ],
         config, registry, bus,
         approve=lambda tool, args: False,
     )
     result = agent.run("写个文件")
 
-    assert result.reason is StopReason.DENIED
+    assert result.reason is StopReason.DONE_READ_ONLY
+    assert result.steps == 2
     assert not (workspace / "x.py").exists()
 
 
@@ -392,13 +579,16 @@ def test_library_default_denies_tools_that_need_approval(
     config, registry, bus, workspace: Path
 ):
     client = FakeClient(
-        [reply("", [call("write_file", {"path": "x.py", "content": "boom"})])]
+        [
+            reply("", [call("write_file", {"path": "x.py", "content": "boom"})]),
+            reply("默认策略拒绝了写入，工作区未修改"),
+        ]
     )
     agent = Agent(config, registry, client, bus)
 
     result = agent.run("写个文件")
 
-    assert result.reason is StopReason.DENIED
+    assert result.reason is StopReason.DONE_READ_ONLY
     assert not (workspace / "x.py").exists()
 
 
@@ -662,3 +852,36 @@ def test_second_task_shares_history(config, registry, bus):
 
     users = [m for m in client.seen[-1] if m["role"] == "user"]
     assert [m["content"] for m in users] == ["任务一", "任务二"]
+
+
+def test_attachment_is_user_context_in_the_same_conversation(config, registry, bus):
+    agent, client = agent_with(
+        [reply("已看日志"), reply("继续处理")], config, registry, bus
+    )
+    agent.run("分析报错", attachment_context="<attachment name='error.log'>boom</attachment>")
+    agent.run("结合上一轮继续")
+
+    users = [m["content"] for m in client.seen[-1] if m["role"] == "user"]
+    assert users[0].startswith("分析报错")
+    assert "error.log" in users[0]
+    assert "boom" in users[0]
+    assert users[1] == "结合上一轮继续"
+
+
+def test_cancel_before_model_call_stops_without_calling_model(config, registry, bus):
+    cancelled = True
+    client = FakeClient([reply("不应被调用")])
+    agent = Agent(
+        config,
+        registry,
+        client,
+        bus,
+        approve=lambda tool, args: True,
+        cancelled=lambda: cancelled,
+    )
+
+    result = agent.run("取消这一轮")
+
+    assert result.reason is StopReason.CANCELLED
+    assert result.steps == 0
+    assert client.calls_made == 0

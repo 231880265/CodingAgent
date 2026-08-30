@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .base import Tool, ToolError, ToolResult
 from .files import make_edit_file, make_list_dir, make_read_file, make_write_file
@@ -116,6 +116,8 @@ def build_default_registry(
     workspace: Path,
     tool_result_budget: int = 6000,
     extra_tools: list[Tool] | None = None,
+    *,
+    cancelled: Callable[[], bool] | None = None,
 ) -> Registry:
     """核心工具集：列目录、读取、局部编辑、整文件写入和执行命令。
 
@@ -128,7 +130,11 @@ def build_default_registry(
         make_edit_file(workspace),
         make_write_file(workspace),
         make_list_dir(workspace),
-        make_run_command(workspace, tool_result_budget),
+        make_run_command(
+            workspace,
+            tool_result_budget,
+            cancelled=cancelled,
+        ),
     ]
     tools.extend(extra_tools or [])
     return Registry(tools)

@@ -29,6 +29,9 @@ class ApiContractTest {
         registry.add("hako.web.repository-root", REPOSITORY_ROOT::toString);
         registry.add("hako.web.allowed-roots", REPOSITORY_ROOT::toString);
         registry.add("hako.web.worker-entrypoint", () -> "web/worker/fake_worker.py");
+        registry.add(
+                "hako.web.history-database",
+                () -> REPOSITORY_ROOT.resolve("tmp/api-contract-history.db").toString());
     }
 
     @LocalServerPort
@@ -50,7 +53,7 @@ class ApiContractTest {
 
     @Test
     void invalidUuidIsAClientError() throws Exception {
-        HttpResponse<String> response = send("GET", "/api/v1/tasks/not-a-uuid", null);
+        HttpResponse<String> response = send("GET", "/api/v1/sessions/not-a-uuid", null);
 
         assertEquals(400, response.statusCode());
         assertEquals(
@@ -65,7 +68,7 @@ class ApiContractTest {
         body.put("prompt", "contract test");
         body.put("unexpected", true);
 
-        HttpResponse<String> response = send("POST", "/api/v1/tasks", body.toString());
+        HttpResponse<String> response = send("POST", "/api/v1/sessions", body.toString());
 
         assertEquals(400, response.statusCode());
         assertEquals(
@@ -75,7 +78,7 @@ class ApiContractTest {
 
     @Test
     void oversizedBodyIsRejectedBeforeJsonParsing() throws Exception {
-        HttpResponse<String> response = send("POST", "/api/v1/tasks", "x".repeat(65_537));
+        HttpResponse<String> response = send("POST", "/api/v1/sessions", "x".repeat(65_537));
 
         assertEquals(413, response.statusCode());
         assertEquals(

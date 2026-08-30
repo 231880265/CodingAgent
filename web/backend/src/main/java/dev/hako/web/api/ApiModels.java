@@ -7,22 +7,34 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
 public final class ApiModels {
     private ApiModels() {}
 
-    public record CreateTaskRequest(
+    public record CreateSessionRequest(
             @NotBlank @Size(max = 4096) String workspace,
             @NotBlank @Size(max = 20000) String prompt,
-            @Valid TaskOptions options) {}
+            @Valid @Size(max = 5) List<@Valid AttachmentInput> attachments,
+            @Valid RunOptions options) {}
 
-    public record TaskOptions(@Min(1) @Max(100) Integer maxSteps) {
+    public record RunOptions(@Min(1) @Max(100) Integer maxSteps) {
         public int valueOrDefault() {
             return maxSteps == null ? 40 : maxSteps;
         }
     }
+
+    public record CreateRunRequest(
+            @NotBlank @Size(max = 20000) String prompt,
+            @Valid @Size(max = 5) List<@Valid AttachmentInput> attachments,
+            @Valid RunOptions options) {}
+
+    public record AttachmentInput(
+            @NotBlank @Size(max = 255) String name,
+            @NotBlank @Size(max = 200) String mediaType,
+            @NotBlank @Size(max = 40000) String content) {}
 
     public enum ApprovalDecision {
         ALLOW_ONCE,
@@ -34,7 +46,8 @@ public final class ApiModels {
 
     public record ApprovalResponse(
             String schemaVersion,
-            UUID taskId,
+            UUID sessionId,
+            UUID runId,
             UUID approvalId,
             String status,
             ApprovalDecision decision,
@@ -42,9 +55,15 @@ public final class ApiModels {
 
     public record CancelResponse(
             String schemaVersion,
-            UUID taskId,
+            UUID sessionId,
+            UUID runId,
             String status,
             String message) {}
+
+    public record SessionCloseResponse(
+            String schemaVersion,
+            UUID sessionId,
+            String status) {}
 
     public record WorkerHealth(boolean pythonConfigured, boolean entrypointReadable) {}
 

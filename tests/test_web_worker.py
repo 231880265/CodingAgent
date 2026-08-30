@@ -61,16 +61,46 @@ def test_all_declared_events_have_explicit_mapping() -> None:
     assert {event_payload(item)[0] for item in events} == {item.kind for item in events}
 
 
-def test_writer_allocates_contiguous_task_sequence() -> None:
+def test_tool_finished_payload_exposes_facts_for_web_presentation() -> None:
+    event = ev.ToolCallFinished(
+        call_id="compile-1",
+        name="run_command",
+        ok=True,
+        summary="g++ qsort.cpp -o qsort.exe exit=0",
+        detail="exit=0",
+        duration_ms=120,
+        touched_paths=("qsort.exe",),
+        created_paths=("qsort.exe",),
+        derived_paths=("qsort.exe",),
+        verification_kind="build",
+        verification_command="g++ qsort.cpp -o qsort.exe",
+    )
+
+    kind, payload = event_payload(event)
+
+    assert kind == "tool_call_finished"
+    assert payload["derivedPaths"] == ["qsort.exe"]
+    assert payload["verificationKind"] == "build"
+    assert payload["verificationCommand"] == "g++ qsort.cpp -o qsort.exe"
+
+
+def test_writer_allocates_contiguous_session_sequence() -> None:
     stream = io.StringIO()
     writer = ProtocolWriter(stream)
     writer.ready(12)
-    writer.task_message("event", "task", {"kind": "assistant_text", "data": {"text": "中"}})
-    writer.task_message("result", "task", {"success": True})
+    writer.run_message(
+        "event",
+        "session-1",
+        "run-1",
+        {"kind": "assistant_text", "data": {"text": "中"}},
+    )
+    writer.run_message("result", "session-1", "run-1", {"success": True})
     messages = [json.loads(line) for line in stream.getvalue().splitlines()]
     assert messages[0]["type"] == "ready"
     assert "sequence" not in messages[0]
     assert [message["sequence"] for message in messages[1:]] == [1, 2]
+    assert {message["sessionId"] for message in messages[1:]} == {"session-1"}
+    assert {message["runId"] for message in messages[1:]} == {"run-1"}
     assert all(message["protocolVersion"] == PROTOCOL_VERSION for message in messages)
 
 
@@ -93,4 +123,5 @@ def test_input_rejects_wrong_version_and_redacts_secrets() -> None:
     with pytest.raises(ProtocolError, match="protocolVersion"):
         read_message(io.StringIO('{"protocolVersion":"2","type":"start"}\n'))
     assert "secret-token" not in redact("API_KEY=secret-token")
-    assert "sk-abcdefghijklmnop" not in redact("Bearer sk-abcdefghijklmnop")
+    fake_key = "sk-" + "abcdefghijklmnop"
+    assert fake_key not in redact(f"Bearer {fake_key}")
