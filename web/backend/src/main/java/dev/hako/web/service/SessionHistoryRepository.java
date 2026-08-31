@@ -13,6 +13,7 @@ import java.util.UUID;
 import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
+import org.springframework.transaction.annotation.Transactional;
 
 @Repository
 public class SessionHistoryRepository {
@@ -48,6 +49,7 @@ public class SessionHistoryRepository {
                     created_at TEXT NOT NULL,
                     finished_at TEXT,
                     resource_json TEXT NOT NULL,
+                    conversation_user TEXT,
                     summary_json TEXT,
                     UNIQUE(session_id, ordinal)
                 )
@@ -66,6 +68,33 @@ public class SessionHistoryRepository {
                 """);
         jdbc.execute("CREATE INDEX IF NOT EXISTS idx_runs_session ON runs(session_id, ordinal)");
         jdbc.execute("CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id, event_id)");
+        jdbc.execute("""
+                CREATE TABLE IF NOT EXISTS schema_migrations (
+                    version TEXT PRIMARY KEY,
+                    applied_at TEXT NOT NULL
+                )
+                """);
+        ensureColumn("runs", "conversation_user", "TEXT");
+        // 旧版把“新建会话”实现成 CLOSED。新语义下这些本地历史应当可继续，
+        // 只迁移一次；此后显式 close 产生的 CLOSED 仍保持终态。
+        int legacyCloseMigration = jdbc.update(
+                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                "legacy-close-to-suspended-v1",
+                Instant.now().toString());
+        if (legacyCloseMigration == 1) {
+            jdbc.update("""
+                    UPDATE sessions
+                    SET status='SUSPENDED', worker_pid=NULL, closed_at=NULL
+                    WHERE status='CLOSED'
+                    """);
+        }
+        // Spring Boot 重启后旧 Worker 已不存在，数据库里的瞬时活跃状态必须降为
+        // 可恢复的 SUSPENDED，不能继续伪装成 OPEN。
+        jdbc.update("""
+                UPDATE sessions
+                SET status='SUSPENDED', worker_pid=NULL, closed_at=NULL
+                WHERE status IN ('OPENING', 'OPEN', 'SUSPENDING', 'CLOSING')
+                """);
     }
 
     public void saveSession(SessionState session) {
@@ -87,28 +116,23 @@ public class SessionHistoryRepository {
                 session.status.name(),
                 session.workerId.toString(),
                 session.workerPid,
-                session.runs.size(),
+                session.runCount(),
                 session.createdAt.toString(),
                 text(session.closedAt));
     }
 
     public void saveRun(SessionState session, RunState run) {
-        int ordinal = 1;
-        for (UUID id : session.runs.keySet()) {
-            if (id.equals(run.runId)) {
-                break;
-            }
-            ordinal += 1;
-        }
+        int ordinal = session.ordinal(run);
         jdbc.update("""
                 INSERT INTO runs(
                     run_id, session_id, ordinal, status, prompt, created_at,
-                    finished_at, resource_json, summary_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    finished_at, resource_json, conversation_user, summary_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(run_id) DO UPDATE SET
                     status=excluded.status,
                     finished_at=excluded.finished_at,
                     resource_json=excluded.resource_json,
+                    conversation_user=excluded.conversation_user,
                     summary_json=excluded.summary_json
                 """,
                 run.runId.toString(),
@@ -119,6 +143,7 @@ public class SessionHistoryRepository {
                 run.createdAt.toString(),
                 text(run.finishedAt),
                 run.resource(mapper).toString(),
+                run.conversationUserMessage(),
                 run.summary == null ? null : run.summary.toString());
     }
 
@@ -208,6 +233,85 @@ public class SessionHistoryRepository {
                 },
                 sessionId.toString());
         return root;
+    }
+
+    @Transactional
+    public void deleteSession(UUID sessionId) {
+        String id = sessionId.toString();
+        jdbc.update("DELETE FROM events WHERE session_id=?", id);
+        jdbc.update("DELETE FROM runs WHERE session_id=?", id);
+        jdbc.update("DELETE FROM sessions WHERE session_id=?", id);
+    }
+
+    public ObjectNode getResumeSnapshot(UUID sessionId) {
+        ObjectNode root = getHistory(sessionId);
+        if (root == null) {
+            return null;
+        }
+        ArrayNode conversation = root.putArray("conversation");
+        jdbc.query(
+                """
+                SELECT prompt, conversation_user, resource_json, summary_json
+                FROM runs WHERE session_id=? ORDER BY ordinal
+                """,
+                result -> {
+                    String summaryRaw = result.getString("summary_json");
+                    if (summaryRaw == null) {
+                        return;
+                    }
+                    ObjectNode summary = parseObject(summaryRaw);
+                    String finalText = summary.path("finalText").asText("").trim();
+                    if (finalText.isEmpty()) {
+                        return;
+                    }
+                    String user = result.getString("conversation_user");
+                    if (user == null || user.isBlank()) {
+                        user = result.getString("prompt");
+                    }
+                    conversation.addObject().put("role", "user").put("content", user);
+                    conversation.addObject().put("role", "assistant").put("content", finalText);
+                },
+                sessionId.toString());
+        Long maxEventId = jdbc.queryForObject(
+                "SELECT COALESCE(MAX(event_id), 0) FROM events WHERE session_id=?",
+                Long.class,
+                sessionId.toString());
+        root.put("nextEventId", (maxEventId == null ? 0 : maxEventId) + 1);
+        JsonNode runs = root.path("runs");
+        JsonNode last = runs.isArray() && !runs.isEmpty()
+                ? runs.path(runs.size() - 1)
+                : mapper.createObjectNode();
+        root.put("lastMaxSteps", last.path("options").path("maxSteps").asInt(100));
+        return root;
+    }
+
+    public ObjectNode getRunSummary(UUID sessionId, UUID runId) {
+        try {
+            String raw = jdbc.queryForObject(
+                    "SELECT summary_json FROM runs WHERE session_id=? AND run_id=?",
+                    String.class,
+                    sessionId.toString(),
+                    runId.toString());
+            return raw == null ? null : parseObject(raw);
+        } catch (EmptyResultDataAccessException exc) {
+            return null;
+        }
+    }
+
+    private void ensureColumn(String table, String column, String type) {
+        boolean exists = Boolean.TRUE.equals(jdbc.query(
+                "PRAGMA table_info(" + table + ")",
+                result -> {
+                    while (result.next()) {
+                        if (column.equalsIgnoreCase(result.getString("name"))) {
+                            return true;
+                        }
+                    }
+                    return false;
+                }));
+        if (!exists) {
+            jdbc.execute("ALTER TABLE " + table + " ADD COLUMN " + column + " " + type);
+        }
     }
 
     private ObjectNode parseObject(String raw) {

@@ -12,11 +12,9 @@ const props = defineProps<{
   model: string | null;
   workspace: string | null;
   stopReason: StopReason | null;
-  busy: boolean;
 }>();
 
 const emit = defineEmits<{
-  newSession: [];
   history: [];
 }>();
 const runPresentation = computed(() =>
@@ -54,7 +52,7 @@ const connectionLabel = computed(() => {
 
     <div class="header-context" aria-label="当前会话状态">
       <button type="button" class="header-quiet-action" @click="emit('history')">
-        历史
+        会话
       </button>
       <span v-if="model" class="model-name" :title="model">{{ model }}</span>
       <span class="connection-state" :data-state="connection">
@@ -64,15 +62,6 @@ const connectionLabel = computed(() => {
       <span v-if="runStatus !== 'IDLE'" class="run-state" :data-tone="runPresentation.tone">
         {{ runPresentation.label }}
       </span>
-      <button
-        v-if="workspace || sessionStatus !== 'NONE'"
-        type="button"
-        class="new-session-button"
-        :disabled="busy"
-        @click="emit('newSession')"
-      >
-        <span aria-hidden="true">＋</span> 新会话
-      </button>
     </div>
   </header>
 </template>

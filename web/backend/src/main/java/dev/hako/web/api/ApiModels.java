@@ -21,8 +21,10 @@ public final class ApiModels {
             @Valid RunOptions options) {}
 
     public record RunOptions(@Min(1) @Max(100) Integer maxSteps) {
+        public static final int DEFAULT_WEB_SAFETY_BUDGET = 100;
+
         public int valueOrDefault() {
-            return maxSteps == null ? 40 : maxSteps;
+            return maxSteps == null ? DEFAULT_WEB_SAFETY_BUDGET : maxSteps;
         }
     }
 
@@ -61,6 +63,11 @@ public final class ApiModels {
             String message) {}
 
     public record SessionCloseResponse(
+            String schemaVersion,
+            UUID sessionId,
+            String status) {}
+
+    public record SessionSuspendResponse(
             String schemaVersion,
             UUID sessionId,
             String status) {}

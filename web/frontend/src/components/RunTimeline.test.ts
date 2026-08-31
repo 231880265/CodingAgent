@@ -170,6 +170,99 @@ describe("RunTimeline transcript hierarchy", () => {
     expect(stream.textContent).toContain("app/repositories/campaign_repository.py");
   });
 
+  it("collapses consecutive workspace listings into one expandable step", () => {
+    const events = [
+      event("run_started", { task: "定位发布异常。", model: "test-model", cwd: "D:/demo" }),
+      event("tool_call_started", {
+        callId: "list-1",
+        name: "list_dir",
+        args: { path: "." },
+      }),
+      event("tool_call_finished", {
+        callId: "list-1",
+        name: "list_dir",
+        ok: true,
+        summary: "./ 共 5 项",
+      }),
+      event("tool_call_started", {
+        callId: "list-2",
+        name: "list_dir",
+        args: { path: "app" },
+      }),
+      event("tool_call_finished", {
+        callId: "list-2",
+        name: "list_dir",
+        ok: true,
+        summary: "app 共 6 项",
+      }),
+      event("tool_call_started", {
+        callId: "read-1",
+        name: "read_file",
+        args: { path: "README.md" },
+      }),
+    ];
+    const host = mountTimeline(events, true);
+    const stream = host.querySelector(".assistant-activity-stream")!;
+
+    expect(stream.querySelectorAll(":scope > .tool-activity")).toHaveLength(2);
+    expect(stream.querySelector(".workspace-activity-group .event-title-row")?.textContent)
+      .toContain("已查看 2 个位置");
+    expect(stream.querySelectorAll(".read-file-item")).toHaveLength(2);
+    expect(stream.textContent).toContain("app");
+  });
+
+  it("collapses consecutive file changes into one expandable change step", () => {
+    const events = [
+      event("run_started", { task: "补充活动冲突提示。", model: "test-model", cwd: "D:/demo" }),
+      event("tool_call_started", {
+        callId: "edit-1",
+        name: "edit_file",
+        args: { path: "app/api/routes.py", old_text: "old route", new_text: "new route" },
+      }),
+      event("tool_call_finished", {
+        callId: "edit-1",
+        name: "edit_file",
+        ok: true,
+        modifiedPaths: ["app/api/routes.py"],
+      }),
+      event("tool_call_started", {
+        callId: "edit-2",
+        name: "edit_file",
+        args: { path: "app/web/static/app.js", old_text: "old toast", new_text: "new toast" },
+      }),
+      event("tool_call_finished", {
+        callId: "edit-2",
+        name: "edit_file",
+        ok: true,
+        modifiedPaths: ["app/web/static/app.js"],
+      }),
+      event("tool_call_started", {
+        callId: "write-1",
+        name: "write_file",
+        args: { path: "tests/test_conflict.py", content: "def test_conflict(): pass" },
+      }),
+      event("tool_call_finished", {
+        callId: "write-1",
+        name: "write_file",
+        ok: true,
+        createdPaths: ["tests/test_conflict.py"],
+      }),
+      event("tool_call_started", {
+        callId: "test-1",
+        name: "run_command",
+        args: { command: "python -m pytest -q" },
+      }),
+    ];
+    const host = mountTimeline(events, true);
+    const stream = host.querySelector(".assistant-activity-stream")!;
+
+    expect(stream.querySelectorAll(":scope > .tool-activity")).toHaveLength(2);
+    expect(stream.querySelector(".change-activity-group .event-title-row")?.textContent)
+      .toContain("已修改 3 个文件");
+    expect(stream.querySelectorAll(".change-activity-group .read-file-item")).toHaveLength(3);
+    expect(stream.textContent).toContain("tests/test_conflict.py");
+  });
+
   it("keeps repository analysis and its folded trace inside the hako response", () => {
     const events = [
       event("run_started", { task: "分析死锁，不修改代码。", model: "test-model", cwd: "D:/demo" }),
@@ -215,5 +308,45 @@ describe("RunTimeline transcript hierarchy", () => {
     expect(assistant.querySelectorAll(".analysis-trace .read-file-item")).toHaveLength(2);
     expect(assistant.querySelector(":scope > .assistant-content > .assistant-activity-stream")).toBeNull();
     expect(assistant.querySelector(".verified-result")).toBeNull();
+  });
+
+  it("shows honest live progress without exposing a user-facing step limit", () => {
+    const events = [
+      event("run_started", { task: "补充 Priority 逻辑。", model: "test-model", cwd: "D:/demo" }),
+      event("turn_started", { step: 41, maxSteps: 100 }),
+      event("context_stats", { usedTokens: 3200, limit: 1000000, messageCount: 18 }),
+    ];
+    const host = mountTimeline(events, true);
+
+    expect(host.querySelector(".assistant-pending")?.textContent)
+      .toContain("正在理解任务并选择首批相关文件");
+    expect(host.querySelector(".progress-dots")).not.toBeNull();
+    expect(host.querySelector(".runtime-details summary")?.textContent)
+      .toContain("模型决策 41 次");
+    expect(host.querySelector(".runtime-details summary")?.textContent)
+      .not.toContain("/ 100");
+  });
+
+  it("derives specific live progress from the latest real tool evidence", () => {
+    const events = [
+      event("run_started", { task: "定位发布异常。", model: "test-model", cwd: "D:/demo" }),
+      event("tool_call_started", {
+        callId: "read-1",
+        name: "read_file",
+        args: { path: "app/repositories/campaign_repository.py" },
+      }),
+      event("tool_call_finished", {
+        callId: "read-1",
+        name: "read_file",
+        ok: true,
+        touchedPaths: ["app/repositories/campaign_repository.py"],
+      }),
+      event("turn_started", { step: 4, maxSteps: 100 }),
+      event("context_stats", { usedTokens: 7200, limit: 1000000, messageCount: 12 }),
+    ];
+    const host = mountTimeline(events, true);
+
+    expect(host.querySelector(".assistant-pending")?.textContent)
+      .toContain("已读取 repositories/campaign_repository.py，正在结合相关代码定位问题");
   });
 });

@@ -51,6 +51,30 @@ class Conversation:
     def add_user(self, text: str) -> None:
         self.turns.append(Turn({"role": "user", "content": text}))
 
+    def restore_semantic(self, messages: list[dict[str, Any]]) -> None:
+        """恢复跨 Worker 的语义对话，不恢复旧工具观察。
+
+        新 Worker 会重新生成 system prompt，并只接收历史用户目标与最终回答。
+        read_file、stdout 和 tool_calls 代表过去的工作区状态，恢复它们会让模型把
+        旧文件内容误当成当前事实，因此明确排除。
+        """
+        if self.turns:
+            raise ValueError("只能向空 Conversation 恢复历史。")
+        if len(messages) > 200:
+            raise ValueError("恢复的 Conversation 超过 200 条消息。")
+        expected = "user"
+        for item in messages:
+            if not isinstance(item, dict):
+                raise ValueError("Conversation 历史项必须是对象。")
+            role = item.get("role")
+            content = item.get("content")
+            if role != expected or not isinstance(content, str) or not content.strip():
+                raise ValueError("Conversation 必须是非空 user/assistant 交替消息。")
+            self.turns.append(Turn({"role": role, "content": content}))
+            expected = "assistant" if role == "user" else "user"
+        if expected == "assistant":
+            raise ValueError("Conversation 历史不能以未回答的 user 消息结束。")
+
     def add_assistant(self, text: str, calls: list[Any]) -> None:
         """记录 assistant 消息。
 

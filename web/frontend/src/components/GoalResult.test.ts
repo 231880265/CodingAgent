@@ -122,4 +122,14 @@ describe("GoalResult presentation", () => {
     expect(host.querySelector(".verified-result")).toBeNull();
     expect(host.textContent).toContain(title);
   });
+
+  it("shows a safety-budget stop as resumable instead of a run failure", () => {
+    const failedStatus = event("run_status", { current: "FAILED" });
+    const completed = result("max_steps", "已完成部分修改。", ["partial.py"]);
+    const host = mountResult([failedStatus, completed]);
+
+    expect(host.textContent).toContain("本轮已暂停，可以继续");
+    expect(host.textContent).toContain("Conversation 和已落盘修改均已保留");
+    expect(host.textContent).not.toContain("运行失败");
+  });
 });

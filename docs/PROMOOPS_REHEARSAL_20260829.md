@@ -1,73 +1,115 @@
-# PromoOps 连续工程任务彩排与外部评测记录（2026-08-29）
+# PromoOps 两轮工程任务彩排与独立验收
 
-## 目的与边界
+> 最终口径更新于 2026-08-30。演示由 Run1 线上发布 Bug 与 Run2 Priority/Conflict 产品迭代组成。
 
-本轮验证两件事：修复 hako 的重复调用止损器后，仍能拦截真正无进展的循环；同一个 `Session + Worker + Agent + Conversation` 能否在一个持续变化的真实仓库中连续完成 Bug 修复、产品开发和审计回滚。演示仓库位于 `../promoops-demo/work`，模板、reset runner 和 held-out tests 位于 `../promoops-demo`，不进入 CodingAgent Git 仓库。整个过程未提交、未 push，也未删除旧失败历史。
+## 1. 目的与边界
 
-## 1. 内核最小修复
+本演示验证同一个 `Session + Agent + Conversation` 能否在一个持续变化的真实仓库中连续完成“一个真实线上 Bug + 一次真实产品迭代”，并让每轮作者修改都经过 Verified Finish。演示仓库、只读模板、reset runner 和 held-out tests 位于相邻的本地 `../promoops-demo`，不进入 CodingAgent Git 仓库。
 
-问题不是 STUCK 阈值过严，而是重复签名计数跨越了有效修改阶段：`read A → edit A 成功 → reread A` 仍沿用修改前的 read 计数，可能把“修改后确认”误判成重复调查。修复只在工具结果包含真实 `touched_paths` 时清空重复调用计数；仅 `ok=True` 不算进展，因此失败编辑不能洗掉计数；`run_command` 即使退出失败，只要确实改变工作区文件，也会开启新阶段。
+PromoOps 是脱敏的小型电商营销运营后台，不复制生产源码或公司标识。Issue 只描述运营可观察症状与期望结果，不提供源码位置、测试命令或修复答案。Agent 可以读取公开项目测试，但看不到外部 held-out tests。
 
-确定性回归：
+## 2. 可回退工作区
 
-- `read → read → read`：仍为 STUCK；
-- `read → edit 成功 → reread`：不 STUCK；
-- `read → edit 失败 → reread`：不能清零；
-- `run_command` 真实改文件：视为 progress。
-
-验证结果：聚焦 4 项 `4 passed`，`tests/test_loop.py` 为 `39 passed`，hako Python 全量为 `194 passed, 1 skipped`。Skipped 项单独保留，不计作通过。
-
-## 2. 失败现场与可回退性
-
-旧失败 Session `925e9e0c-da8f-4110-bbce-e5e74eab9c0f` 保持关闭且可从 Web 历史只读查看：Run1 完成；Run2 在已修正负 Priority 后、重新验证前达到 40 步上限。它证明旧问题不是简单的同签名 STUCK，同时保留了修复前后的真实对照。更早的失败 Session `683a197f-0144-4643-bf4a-cb569894f4d7` 也未删除。
-
-彩排前由 `reset_demo.py run1` 从只读模板重建 `work/`，校验结果为 `DIFF_COUNT=0, FILES=44`；模板不含 `.git`、数据库和生成缓存。再次演示时可先停止正在运行的 PromoOps 服务，再执行：
+标准模板保持只读，Agent 只操作 `work/`。重新测试前停止仍在运行的 PromoOps 服务，再执行：
 
 ```powershell
-cd "D:\学校事务\预推免\项目vibecoding\promoops-demo"
+Set-Location 'D:\学校事务\预推免\项目vibecoding\promoops-demo'
 .\.venv\Scripts\python.exe -B .\reset_demo.py run1
+.\start-demo.ps1
 ```
 
-Reset 只恢复演示仓库，不会删除 hako Web 历史。若需要保留某次运行后的源码，应先复制 `work/`，因为 Reset 的语义是重新生成演示工作区。
+Reset 会用 `templates/run1_initial` 重新生成 `work/`，不会删除 hako Web 历史，也不会改变标准模板。若要保留一次运行后的代码，应先复制 `work/`；Cancel 只停止 Agent 后续行为，不回滚已经落盘的修改。
 
-## 3. 同一 Session 连续彩排
+启动真实 hako Web：
 
-Session `ba47db46-259a-4750-97b9-726eedfd5abe` 始终复用 Worker `c90990e9-333e-48c7-b992-175aaedec157`。前三个 Run 是视频主线；后两个 Run 是 held-out 反馈后的 QA follow-up，不改变三轮产品故事。
+```powershell
+Set-Location 'D:\学校事务\预推免\项目vibecoding\coding-agent'
+.\start-web.ps1 -AllowedRoot 'D:\学校事务\预推免\项目vibecoding\promoops-demo\work'
+```
 
-| Run | Run ID | 结果 | 步数 | 交付 |
-|---|---|---:|---:|---|
-| Run1：发布成功但线上仍读旧版本 | `7047412e-7093-4918-96ec-ec0276b22678` | `done_verified` | 11 | 修复 Repository 漏持久化 `published_revision_id`；完整 pytest 26 passed |
-| Run2：Priority 与发布冲突 | `500e0497-5c8d-49e4-aa4c-919e069461c8` | `done_verified` | 52 | Priority、范围定价、409 冲突与无副作用、UI 和回归测试；38 passed |
-| Run3：发布审计与版本回滚 | `39558b02-f4ed-4597-af95-0f6e3c528648` | `done_verified` | 51 | 审计表、Repository/UoW、发布审计、原子回滚、API、真实 UI；53 passed |
-| QA1：外部契约兼容 | `11d4c4d5-3265-4e47-baab-6aca9f1e13a6` | `done_verified` | 20 | PUT/PATCH 兼容、业务版本号、`restored_version`、页面文案；60 passed |
-| QA2：剩余字段/信息层级 | `5ae36461-9456-49e0-9279-157a0172470b` | `done_verified` | 15 | `timestamp` 别名、单一“发布记录”面板；61 passed |
+## 3. Run1：发布成功后线上仍读旧版本
 
-审批过程中还保留了两个真实受控执行例子：一次含字面量 `\\n`、会写坏 Python import 的模型编辑被拒绝后正确重试；一次为了匹配两个 UI 词语而复制整张审计表的提议被两次拒绝，最终改为单一“发布记录”面板加“操作审计”标签。说明审批不是装饰，而是阻止模型把“测试可过”当成“产品合理”。
+### 运营反馈
 
-## 4. 独立 held-out evaluation
+“618 数码满减”线上 v1 是满 150 元减 20 元；运营保存 v2 草稿，规则是满 300 元减 50 元。320 元订单在草稿预览中应付 270 元。点击“发布 v2”后页面提示成功，但刷新仍显示线上 v1，实际应付仍是 300 元。
 
-外部 runner 每次先跑仓库公开测试，再从 `held_out/` 加载独立验收；Agent 没有读取或修改 held-out 源码，只收到失败症状和公开产品契约。
+期望：发布成功后线上立即切换到刚发布草稿；未发布草稿不能提前影响线上；发布失败时原线上版本保持可用；以后线上始终采用最后一次成功发布的版本。
 
-第一次外测：Run1 为 9/9；Run2 因 Priority HTTP method 合约差异为 2/6；Run3 因业务版本字段、rollback 响应和页面文案差异为 1/5。核心行为存在，但外部消费者无法按约定使用，不能记作通过。
+### 根因与交付
 
-QA follow-up 后最终复验：
+发布服务已经在内存对象中设置 `campaign.published_revision_id = draft_id`，接口因此能返回成功；但 `CampaignRepository.save()` 漏掉了该字段的数据库持久化。下一请求重新从数据库读取后，线上指针仍是 v1。修复只需要在 Repository 保存路径补齐该字段，不改测试配置或工作区外文件。
 
-| 评测 | 公开测试 | held-out | 结论 |
+最终模板证据：
+
+- Run1 初态：`1 failed, 26 passed`；失败稳定复现发布后线上仍读取旧版本。
+- 修复后 / Run2 起点：`27 passed`。
+- 独立 Run1 held-out：`9 passed`。
+- 一次保留的真实 Web 轨迹：14 次模型决策、27 次工具调用、4 次审批，只修改 `app/repositories/campaign_repository.py`，最终 `DONE_VERIFIED`。
+
+该轨迹证明 Real Worker、模型 Tool Calling、本地编辑、失败恢复和 Verified Finish 能端到端闭合；单次样例不代表任意任务成功率。
+
+## 4. Run2：活动 Priority 与发布冲突
+
+### 运营反馈
+
+同一商品范围可能同时命中多个活动，运营无法明确控制最终采用哪一个，也不能在发布前发现同优先级冲突，存在重复优惠或选错活动的风险。
+
+期望：列表和详情可查看、修改非负 Priority；同范围多个有效活动只选择 Priority 最高者；保存后若形成同范围同 Priority 冲突，必须立即指出冲突活动和风险；发布冲突应拒绝且不能留下半完成状态；不同范围互不影响。
+
+### 同一 Session 的产品迭代
+
+Run2 直接在 Run1 修好的 `work/` 中继续，不复制标准答案模板，也不创建新的 Conversation。交付跨越：
+
+```text
+领域冲突规则
+  → Campaign/Conflict Service
+  → 发布前无副作用校验
+  → 按最高 Priority 选择线上报价
+  → Priority API
+  → 页面保存后的即时冲突反馈
+  → 持久化、冲突、跨范围、无部分提交和 UI 回归测试
+```
+
+关键验收之一是：周末闪促从 50 调到 100、与“618 数码满减”同范围同优先级时，保存后不能只弹“优先级已更新”，必须立即显示冲突对象；冲突发布后活动仍保持草稿状态。
+
+最终模板证据：
+
+- Run2 起点：`27 passed`。
+- Run2 完成态：`36 passed`。
+- 独立 Run2 held-out：`6 passed`。
+
+## 5. 独立验收为什么必要
+
+Agent 内部运行公开测试回答“它为什么认为自己修好了”；外部 held-out runner 回答“评测者是否应该相信它”。外部验收从 Agent 不可见的位置加载，检查公开行为契约和允许变更范围，不接受模型自己的总结作为证据。
+
+当前最终口径：
+
+| 阶段 | 公开测试 | held-out | 结论 |
 |---|---:|---:|---|
-| Run1 | 61 passed | 9 passed | independently verified |
-| Run2 | 61 passed | 6 passed | independently verified |
-| Run3 | 61 passed | 5 passed | independently verified |
+| Run1 初态 | `1 failed, 26 passed` | 不适用 | Bug 可稳定复现 |
+| Run1 修复 / Run2 起点 | `27 passed` | Run1 `9 passed` | 发布一致性独立通过 |
+| Run2 完成态 | `36 passed` | Run2 `6 passed` | Priority/Conflict 独立通过 |
 
-总计 20 项 held-out 全部通过。唯一剩余输出是 Starlette TestClient 对依赖迁移的 deprecation warning，不影响本次行为结果，但后续依赖升级时应处理。
+这些数字属于不同阶段和测试集，不相加成“总通过数”。Verified Finish 也只证明最后一次作者修改之后存在有效验证，不代表测试覆盖全部风险。
 
-## 5. 答辩口径
+## 6. 演示与答辩口径
 
-这不是“模型一次生成三项功能”的成功截图。可信故事是：hako 先在同一会话中连续完成一个线上 Bug 和两次产品迭代，每次修改后由 Verified Finish 要求新的可执行验证；随后独立验收仍找出 API 消费者契约差异，Agent 根据外部证据做兼容修复，最终公开测试与 held-out 同时通过。需要诚实说明前三个 Run 是产品主线，后两个是 QA 闭环；这比隐藏首次失败更能证明框架支持真实软件工程中的实现、反馈、修正与复验。
+视频故事固定为：
 
-## 6. 2026-08-30 彩排缺陷收束
+```text
+运营发现真实线上 Bug
+  → 只提供症状和期望
+  → hako 调查跨层调用链
+  → 只做必要 Repository 修复
+  → 最后修改后完整测试通过
+  → 刷新后台，线上 v2 与草稿一致
+  → 同一 Session 追加 Priority/Conflict 需求
+  → 仓库、页面和测试继续演进
+  → 独立 held-out 复核
+```
 
-真实 Run1 中，DeepSeek 使用 `..\.venv\Scripts\python.exe -B -m pytest ...` 并得到测试通过，但验证注册表过去只识别解释器后直接跟 `-m` 的形式，最终被保守地终止为 `done_unverified`。最小修复只允许安全的 `-B` 出现在 `-m` 前，同时覆盖 pytest、unittest 与 compileall 既有边界；聚焦 Shell 测试 49 passed，hako Python 全量 196 passed、1 skipped。
+答辩时不要把 Run2 说成第二个故意埋的 Bug，它是一次真实产品迭代。核心结论是：hako 既能修复已有工程缺陷，也能在同一持续会话中继续开发功能，并且每次完成都由本地结构化证据而不是模型自述决定。
 
-同轮还收束了两项演示与呈现问题：PromoOps 未发布活动不再因空线上报价返回 500，本地服务默认监听 Agent 修改的 Python 源码；Web 将相邻的多个 `read_file` 合并成一个“已读取 N 个文件”步骤，展开后先看文件清单，再按文件查看参数和原始结果，非连续读取和其他工具仍保持原顺序。前端 24 项测试、TypeScript 检查和生产构建均通过。Issue 文案只保留运营反馈与期望效果，不再把测试命令、源码位置或修复方向透露给 Agent。
+## 7. 与 hako 内核问题的关系
 
-本次 `work/` 原现场已保存在 `../promoops-demo/work-run1-unverified-20260830-131000/`，随后从修订后的 Run1 模板重新生成；关键故障文件哈希一致，说明仍保留可复现 Bug，没有把 Agent 的答案写回初始模板。本轮未 commit、未 push。
+PromoOps 彩排还帮助固定了四个通用机制：修改后重新读取不应被 STUCK 误伤；Windows 测试必须使用正确 Python 环境；`python -B -m pytest` 应被识别为安全验证；Web 应合并连续读取和修改，只把参数、stdout/stderr 放在折叠证据里。这些机制已经进入核心或前端回归测试，不再依赖保留旧演示数据才能成立。

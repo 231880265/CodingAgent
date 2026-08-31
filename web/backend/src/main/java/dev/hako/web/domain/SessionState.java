@@ -32,10 +32,13 @@ public final class SessionState {
             "worker_exited",
             "stream_gap");
 
-    public final UUID sessionId = UUID.randomUUID();
-    public final UUID workerId = UUID.randomUUID();
+    public final UUID sessionId;
+    public final UUID workerId;
     public final Path workspace;
-    public final Instant createdAt = Instant.now();
+    public final Instant createdAt;
+    public final int priorRunCount;
+    public final long firstEventId;
+    public final JsonNode restoredConversation;
     public final Map<UUID, RunState> runs = new LinkedHashMap<>();
     public final Deque<BufferedEvent> events = new ArrayDeque<>();
     public final List<SseEmitter> subscribers = new ArrayList<>();
@@ -56,8 +59,54 @@ public final class SessionState {
             String prompt,
             int maxSteps,
             List<AttachmentInput> attachments) {
+        this(
+                UUID.randomUUID(),
+                workspace,
+                Instant.now(),
+                0,
+                1,
+                null,
+                prompt,
+                maxSteps,
+                attachments);
+    }
+
+    public SessionState(
+            UUID sessionId,
+            Path workspace,
+            Instant createdAt,
+            int priorRunCount,
+            long nextEventId,
+            JsonNode restoredConversation,
+            String prompt,
+            int maxSteps,
+            List<AttachmentInput> attachments) {
+        this.sessionId = sessionId;
+        this.workerId = UUID.randomUUID();
         this.workspace = workspace;
+        this.createdAt = createdAt;
+        this.priorRunCount = priorRunCount;
+        this.firstEventId = Math.max(1, nextEventId);
+        this.nextEventId = this.firstEventId;
+        this.restoredConversation = restoredConversation == null
+                ? null
+                : restoredConversation.deepCopy();
         createRun(prompt, maxSteps, attachments);
+    }
+
+    public int runCount() {
+        return priorRunCount + runs.size();
+    }
+
+    public int ordinal(RunState target) {
+        int ordinal = priorRunCount + 1;
+        for (RunState run : runs.values()) {
+            if (run == target) {
+                return ordinal;
+            }
+            ordinal += 1;
+        }
+        throw new IllegalArgumentException("Run 不属于当前 Session。");
     }
 
     public RunState createRun(
@@ -80,14 +129,15 @@ public final class SessionState {
         root.put("sessionId", sessionId.toString());
         root.put("status", status.name());
         root.put("workspace", workspace.toString());
-        root.put("runCount", runs.size());
+        root.put("runCount", runCount());
         root.put(
                 "canContinue",
-                status == SessionStatus.OPEN
-                        && currentRun != null
+                currentRun != null
                         && currentRun.status.isTerminal()
-                        && worker != null
-                        && worker.isAlive());
+                        && ((status == SessionStatus.OPEN
+                                        && worker != null
+                                        && worker.isAlive())
+                                || status == SessionStatus.SUSPENDED));
         root.put("createdAt", createdAt.toString());
         if (closedAt == null) {
             root.putNull("closedAt");
@@ -186,8 +236,13 @@ public final class SessionState {
     }
 
     private String workerStatus() {
-        if (status == SessionStatus.CLOSED || status == SessionStatus.FAILED) {
+        if (status == SessionStatus.SUSPENDED
+                || status == SessionStatus.CLOSED
+                || status == SessionStatus.FAILED) {
             return "EXITED";
+        }
+        if (status == SessionStatus.SUSPENDING || status == SessionStatus.CLOSING) {
+            return "STOPPING";
         }
         if (worker != null && worker.isAlive() && workerReady) {
             return "READY";

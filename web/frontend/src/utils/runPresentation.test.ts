@@ -103,6 +103,16 @@ describe("deriveRunPresentation", () => {
     expect(deriveRunPresentation(completed, [status, completed]).kind).toBe("cancelled");
   });
 
+  it("treats the safety budget as resumable incomplete work, not a crash", () => {
+    const status = event("run_status", { current: "FAILED" });
+    const completed = result("max_steps", {
+      success: false,
+      changedPaths: ["app/services/campaign_service.py"],
+    });
+
+    expect(deriveRunPresentation(completed, [status, completed]).kind).toBe("incomplete");
+  });
+
   it("does not label every completed run as verified in the header", () => {
     expect(statusPresentation("COMPLETED", "done_read_only")).toEqual({
       label: "已完成",

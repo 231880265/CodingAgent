@@ -6,6 +6,7 @@ import { formatTime, formatTokens, readPayload } from "../utils/presentation";
 import { deriveRunPresentation } from "../utils/runPresentation";
 import EventItem from "./EventItem.vue";
 import GoalResult from "./GoalResult.vue";
+import ChangeActivityGroup from "./ChangeActivityGroup.vue";
 import ReadActivityGroup from "./ReadActivityGroup.vue";
 import ToolActivity from "./ToolActivity.vue";
 
@@ -24,12 +25,10 @@ type TimelineEntry =
 
 type RawActivityEntry = Exclude<TimelineEntry, { kind: "goal" } | { kind: "result" }>;
 type ToolEntry = Extract<TimelineEntry, { kind: "tool" }>;
-type ReadGroupEntry = {
-  kind: "read-group";
-  key: string;
-  runId: string;
-  activities: ToolEntry[];
-};
+type ReadGroupEntry =
+  | { kind: "read-group"; key: string; runId: string; activities: ToolEntry[] }
+  | { kind: "workspace-group"; key: string; runId: string; activities: ToolEntry[] }
+  | { kind: "change-group"; key: string; runId: string; activities: ToolEntry[] };
 type ActivityEntry = RawActivityEntry | ReadGroupEntry;
 
 interface RunGroup {
@@ -39,6 +38,11 @@ interface RunGroup {
   activities: ActivityEntry[];
   result: Extract<TimelineEntry, { kind: "result" }> | null;
   assistantAt: string;
+}
+
+interface ActiveProgress {
+  label: string;
+  animated: boolean;
 }
 
 const props = defineProps<{ events: HakoEvent[]; active: boolean }>();
@@ -199,7 +203,7 @@ const groups = computed<RunGroup[]>(() => {
   }
 
   for (const group of ordered) {
-    group.activities = collapseReadActivities(group.activities);
+    group.activities = collapseToolActivities(group.activities);
   }
 
   return ordered;
@@ -230,6 +234,54 @@ const hasRuntimeFacts = computed(() =>
   props.events.some((event) => hiddenTypes.has(event.type)),
 );
 
+const activeProgress = computed<ActiveProgress | null>(() => {
+  if (!props.active) return null;
+  const events = props.events.filter(
+    (event) => (event.runId ?? "legacy-run") === latestRunId.value,
+  );
+  if (!events.length) return { label: "正在启动专属 Worker", animated: true };
+
+  const pendingCalls = new Set<string>();
+  for (const event of events) {
+    if (event.type === "tool_call_started") {
+      pendingCalls.add(stringValue(readPayload(event.payload, "callId")));
+    } else if (event.type === "tool_call_finished") {
+      pendingCalls.delete(stringValue(readPayload(event.payload, "callId")));
+    }
+  }
+  // 未完成工具已经由 ToolActivity 自身显示真实动作与参数，避免重复一行。
+  if (pendingCalls.size) return null;
+
+  const lastApproval = [...events].reverse().find(
+    (event) => ["approval_required", "approval_resolved"].includes(event.type),
+  );
+  if (lastApproval?.type === "approval_required") {
+    return { label: "等待你确认后继续", animated: false };
+  }
+
+  const last = events.at(-1);
+  if (!last || ["run_result", "run_finished", "run_cancelled"].includes(last.type)) return null;
+
+  // turn/context 事件只是诊断心跳。面向用户的进度应回看最近一次真实说明或工具结果，
+  // 这样既比固定文案具体，也不会凭空声称已经找到某个根因。
+  const significant = [...events].reverse().find((event) =>
+    ["assistant_text", "tool_call_finished"].includes(event.type),
+  );
+  if (significant?.type === "assistant_text") {
+    const summary = summarizeAssistantText(
+      stringValue(readPayload(significant.payload, "text")),
+    );
+    return {
+      label: summary ? `正在根据当前判断继续：${summary}` : "正在选择下一步操作",
+      animated: true,
+    };
+  }
+  if (significant?.type === "tool_call_finished") {
+    return progressAfterTool(events, significant);
+  }
+  return { label: "正在理解任务并选择首批相关文件", animated: true };
+});
+
 watch(
   () => props.events.length,
   async () => {
@@ -254,8 +306,110 @@ function stringValue(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
+function stringList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
+}
+
+function progressAfterTool(events: HakoEvent[], event: HakoEvent): ActiveProgress {
+  const name = stringValue(readPayload(event.payload, "name"));
+  const ok = readPayload(event.payload, "ok") === true;
+  const subject = toolSubject(events, event);
+  if (name === "read_file") {
+    return {
+      label: subject
+        ? `已读取 ${compactPath(subject)}，正在结合相关代码定位问题`
+        : "已读取代码，正在结合相关实现定位问题",
+      animated: true,
+    };
+  }
+  if (name === "list_dir") {
+    return {
+      label: subject
+        ? `已查看 ${compactPath(subject)}，正在选择需要深入读取的文件`
+        : "已查看仓库结构，正在选择需要深入读取的文件",
+      animated: true,
+    };
+  }
+  if (name === "delegate_readonly") {
+    return { label: "只读调查已返回，正在整合调查结论", animated: true };
+  }
+  if (["edit_file", "write_file"].includes(name)) {
+    const count = changedPathCount(events);
+    return {
+      label: count
+        ? `已修改 ${count} 个文件，正在检查影响并选择验证方式`
+        : "修改已落盘，正在检查影响并选择验证方式",
+      animated: true,
+    };
+  }
+  if (name === "run_command") {
+    const verificationKind = stringValue(readPayload(event.payload, "verificationKind"));
+    const noun = verificationKind === "test"
+      ? "测试"
+      : verificationKind === "build"
+        ? "构建"
+        : verificationKind === "check"
+          ? "静态检查"
+          : "命令";
+    if (!ok) return { label: `${noun}未通过，正在根据输出调整下一步`, animated: true };
+    if (verificationKind) {
+      return { label: `${noun}已通过，正在检查是否满足完成条件`, animated: true };
+    }
+    return { label: "命令执行完成，正在分析输出", animated: true };
+  }
+  return { label: "正在继续处理当前任务", animated: true };
+}
+
+function toolSubject(events: HakoEvent[], finished: HakoEvent): string {
+  const touched = stringList(readPayload(finished.payload, "touchedPaths"));
+  if (touched[0]) return touched[0];
+  const callId = stringValue(readPayload(finished.payload, "callId"));
+  const started = [...events].reverse().find((event) =>
+    event.type === "tool_call_started"
+      && stringValue(readPayload(event.payload, "callId")) === callId,
+  );
+  const args = readPayload(started?.payload, "args");
+  return stringValue(readPayload(args, "path")) || stringValue(readPayload(args, "command"));
+}
+
+function changedPathCount(events: HakoEvent[]): number {
+  const paths = new Set<string>();
+  for (const event of events) {
+    if (event.type !== "tool_call_finished") continue;
+    if (readPayload(event.payload, "ok") !== true) continue;
+    const name = stringValue(readPayload(event.payload, "name"));
+    if (!["edit_file", "write_file"].includes(name)) continue;
+    for (const key of ["createdPaths", "modifiedPaths", "deletedPaths"]) {
+      for (const path of stringList(readPayload(event.payload, key))) paths.add(path);
+    }
+  }
+  return paths.size;
+}
+
+function compactPath(value: string): string {
+  const parts = value.replaceAll("\\", "/").split("/").filter(Boolean);
+  return parts.slice(-2).join("/") || value;
+}
+
+function summarizeAssistantText(value: string): string {
+  const plain = value
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/[`*_>#-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!plain) return "";
+  const first = plain.split(/(?<=[。！？!?])\s*/)[0] || plain;
+  return first.length > 72 ? `${first.slice(0, 72)}…` : first;
+}
+
 function entryTime(entry: ActivityEntry): string {
-  if (entry.kind === "read-group") {
+  if (
+    entry.kind === "read-group"
+    || entry.kind === "workspace-group"
+    || entry.kind === "change-group"
+  ) {
     const last = entry.activities.at(-1);
     return last ? entryTime(last) : "";
   }
@@ -265,35 +419,45 @@ function entryTime(entry: ActivityEntry): string {
   return entry.event.occurredAt;
 }
 
-function collapseReadActivities(activities: ActivityEntry[]): ActivityEntry[] {
+function collapseToolActivities(activities: ActivityEntry[]): ActivityEntry[] {
   const collapsed: ActivityEntry[] = [];
-  let reads: ToolEntry[] = [];
+  let pending: ToolEntry[] = [];
+  let pendingTool = "";
 
-  const flushReads = (): void => {
-    const first = reads[0];
+  const flushPending = (): void => {
+    const first = pending[0];
     if (!first) return;
-    if (reads.length === 1) {
+    if (pending.length === 1) {
       collapsed.push(first);
-    } else if (reads.length > 1) {
+    } else {
       collapsed.push({
-        kind: "read-group",
-        key: `read-group-${first.key}-${reads.at(-1)?.key}`,
+        kind: pendingTool === "list_dir"
+          ? "workspace-group"
+          : pendingTool === "change"
+            ? "change-group"
+            : "read-group",
+        key: `${pendingTool}-group-${first.key}-${pending.at(-1)?.key}`,
         runId: first.runId,
-        activities: reads,
+        activities: pending,
       });
     }
-    reads = [];
+    pending = [];
+    pendingTool = "";
   };
 
   for (const activity of activities) {
-    if (activity.kind === "tool" && toolName(activity) === "read_file") {
-      reads.push(activity);
+    const name = activity.kind === "tool" ? toolName(activity) : "";
+    const groupTool = ["edit_file", "write_file"].includes(name) ? "change" : name;
+    if (["read_file", "list_dir", "change"].includes(groupTool)) {
+      if (pendingTool && pendingTool !== groupTool) flushPending();
+      pendingTool = groupTool;
+      pending.push(activity as ToolEntry);
       continue;
     }
-    flushReads();
+    flushPending();
     collapsed.push(activity);
   }
-  flushReads();
+  flushPending();
   return collapsed;
 }
 
@@ -338,7 +502,7 @@ function toolName(activity: ToolEntry): string {
             >
               <summary>
                 运行详情
-                <span v-if="runtimeFacts.step != null">模型决策 {{ runtimeFacts.step }} / {{ runtimeFacts.maxSteps }}</span>
+                <span v-if="runtimeFacts.step != null">模型决策 {{ runtimeFacts.step }} 次</span>
               </summary>
               <dl>
                 <div v-if="runtimeFacts.usedTokens != null">
@@ -363,7 +527,12 @@ function toolName(activity: ToolEntry): string {
             <div v-if="group.activities.length" class="assistant-activity-stream" aria-label="内部执行过程">
               <template v-for="entry in group.activities" :key="entry.key">
                 <ReadActivityGroup
-                  v-if="entry.kind === 'read-group'"
+                  v-if="entry.kind === 'read-group' || entry.kind === 'workspace-group'"
+                  :activities="entry.activities"
+                  :kind="entry.kind === 'workspace-group' ? 'workspace' : 'read'"
+                />
+                <ChangeActivityGroup
+                  v-else-if="entry.kind === 'change-group'"
                   :activities="entry.activities"
                 />
                 <ToolActivity
@@ -380,14 +549,20 @@ function toolName(activity: ToolEntry): string {
               </template>
             </div>
 
+            <p
+              v-if="active && group.runId === latestRunId && activeProgress"
+              class="assistant-pending"
+              :data-waiting="!activeProgress.animated"
+              aria-live="polite"
+            >
+              {{ activeProgress.label }}<span v-if="activeProgress.animated" class="progress-dots" aria-hidden="true">...</span>
+            </p>
+
             <GoalResult
               v-if="group.result"
               :event="group.result.event"
               :events="group.result.runEvents"
             />
-            <p v-else-if="active && group.runId === latestRunId && !group.activities.length" class="assistant-pending">
-              正在理解任务…
-            </p>
           </div>
         </section>
       </section>

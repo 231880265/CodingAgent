@@ -18,6 +18,7 @@ import type {
   SessionHistoryItem,
   SessionHistoryList,
   SessionResource,
+  SessionSuspendResponse,
 } from "../types/api";
 
 export class MockGateway implements HakoGateway {
@@ -39,7 +40,7 @@ export class MockGateway implements HakoGateway {
   }
 
   async createSession(request: CreateSessionRequest): Promise<SessionResource> {
-    if (this.session && !["CLOSED", "FAILED"].includes(this.session.status)) {
+    if (this.session && !["SUSPENDED", "CLOSED", "FAILED"].includes(this.session.status)) {
       throw new Error("当前 Session 尚未关闭。");
     }
     this.handlers.clear();
@@ -96,6 +97,64 @@ export class MockGateway implements HakoGateway {
     this.emit("run_status", { previous: null, current: "PENDING", reason: "复用 Conversation" }, run.runId);
     setTimeout(() => this.beginRun(run.runId), 100);
     return clone(session);
+  }
+
+  async resumeSession(sessionId: string, request: CreateRunRequest): Promise<SessionResource> {
+    this.snapshotHistory();
+    if (this.session && !["SUSPENDED", "CLOSED", "FAILED"].includes(this.session.status)) {
+      throw new Error("当前 Session 仍在运行，请先挂起。");
+    }
+    const stored = this.history.get(sessionId);
+    if (!stored) throw new Error("历史 Session 不存在。");
+    if (stored.status !== "SUSPENDED") {
+      throw new Error("只有已挂起的 Session 可以恢复继续。");
+    }
+    this.handlers.clear();
+    this.events.length = 0;
+    this.events.push(...clone(stored.events));
+    this.runs.length = 0;
+    this.runs.push(...clone(stored.runs));
+    this.eventId = this.events.reduce((latest, event) => Math.max(latest, event.eventId), 0);
+    const maxSteps = request.options?.maxSteps
+      ?? stored.runs.at(-1)?.options.maxSteps
+      ?? 40;
+    const run = this.makeRun(request.prompt, maxSteps, request.attachments);
+    this.runs.push({ ...clone(run), summary: null });
+    this.session = {
+      schemaVersion: "1.0",
+      sessionId,
+      status: "OPENING",
+      workspace: stored.workspace,
+      runCount: stored.runCount + 1,
+      canContinue: false,
+      createdAt: stored.createdAt,
+      closedAt: null,
+      worker: {
+        workerId: crypto.randomUUID(),
+        pid: 24002,
+        alive: true,
+        status: "STARTING",
+      },
+      currentRun: run,
+      links: {
+        self: `/api/v1/sessions/${sessionId}`,
+        events: `/api/v1/sessions/${sessionId}/events`,
+        runs: `/api/v1/sessions/${sessionId}/runs`,
+        currentSummary: `/api/v1/sessions/${sessionId}/runs/${run.runId}/summary`,
+      },
+    };
+    this.emit("session_status", {
+      previous: "SUSPENDED",
+      current: "OPENING",
+      reason: "重建持久化 Conversation",
+    });
+    this.emit("run_status", {
+      previous: null,
+      current: "PENDING",
+      reason: "恢复后续 Run",
+    }, run.runId);
+    setTimeout(() => this.openAndRun(run.runId), 120);
+    return clone(this.session);
   }
 
   async getSession(sessionId: string): Promise<SessionResource> {
@@ -197,6 +256,53 @@ export class MockGateway implements HakoGateway {
       this.snapshotHistory();
     }, 180);
     return { schemaVersion: "1.0", sessionId, status: "CLOSING" };
+  }
+
+  async suspendSession(sessionId: string): Promise<SessionSuspendResponse> {
+    const session = this.requireSession(sessionId);
+    if (session.status === "SUSPENDED") {
+      return { schemaVersion: "1.0", sessionId, status: "SUSPENDED" };
+    }
+    if (["PENDING", "RUNNING", "WAITING_APPROVAL", "CANCELLING"].includes(session.currentRun.status)) {
+      throw new Error("请先等待当前 Run 取消完成。");
+    }
+    if (session.status === "SUSPENDING") {
+      return { schemaVersion: "1.0", sessionId, status: "SUSPENDING" };
+    }
+    const previous = session.status;
+    session.status = "SUSPENDING";
+    session.canContinue = false;
+    session.worker.status = "STOPPING";
+    this.emit("session_status", { previous, current: "SUSPENDING", reason: "停止演示 Worker" });
+    setTimeout(() => {
+      if (!this.session || this.session.sessionId !== sessionId) return;
+      session.status = "SUSPENDED";
+      session.canContinue = true;
+      session.worker.alive = false;
+      session.worker.status = "EXITED";
+      session.worker.pid = null;
+      this.emit("worker_exited", { workerId: session.worker.workerId, expected: true });
+      this.emit("session_status", {
+        previous: "SUSPENDING",
+        current: "SUSPENDED",
+        reason: "会话已挂起，可恢复继续",
+      });
+      this.snapshotHistory();
+    }, 180);
+    return { schemaVersion: "1.0", sessionId, status: "SUSPENDING" };
+  }
+
+  async deleteSession(sessionId: string): Promise<void> {
+    if (this.session?.sessionId === sessionId) {
+      if (["PENDING", "RUNNING", "WAITING_APPROVAL", "CANCELLING"]
+        .includes(this.session.currentRun.status)) {
+        throw new Error("当前任务仍在运行，请先停止本轮再删除会话。");
+      }
+      this.session = null;
+      this.events.length = 0;
+      this.runs.length = 0;
+    }
+    if (!this.history.delete(sessionId)) throw new Error("历史 Session 不存在。");
   }
 
   async getRunSummary(sessionId: string, runId: string): Promise<RunSummary> {

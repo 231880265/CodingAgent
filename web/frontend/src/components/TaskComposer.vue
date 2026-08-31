@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from "vue";
-import { Stepper } from "vant";
 import type {
   AttachmentInput,
   CreateRunRequest,
@@ -22,10 +21,13 @@ const emit = defineEmits<{
   cancel: [];
 }>();
 
+// Web 端不把循环保险暴露成用户配置。100 次只作为内部失控熔断值；
+// 正常任务由 Verified Finish、只读完成、错误、取消或 stuck detector 更早终止。
+const WEB_RUN_SAFETY_BUDGET = 100;
+
 const form = reactive({
   workspace: props.mode === "mock" ? "D:\\demo\\router-header" : "",
   prompt: "",
-  maxSteps: 40,
 });
 const attachments = ref<AttachmentInput[]>([]);
 const validationMessage = ref("");
@@ -59,7 +61,6 @@ watch(
       return;
     }
     form.workspace = session.workspace;
-    form.maxSteps = session.currentRun.options.maxSteps;
     if (session.currentRun.runId !== previousRunId) {
       form.prompt = "";
       attachments.value = [];
@@ -121,7 +122,7 @@ function submit(): void {
     emit("continue", {
       prompt,
       attachments: [...attachments.value],
-      options: { maxSteps: Number(form.maxSteps) },
+      options: { maxSteps: WEB_RUN_SAFETY_BUDGET },
     });
     return;
   }
@@ -139,7 +140,7 @@ function submit(): void {
     workspace,
     prompt,
     attachments: [...attachments.value],
-    options: { maxSteps: Number(form.maxSteps) },
+    options: { maxSteps: WEB_RUN_SAFETY_BUDGET },
   });
 }
 
@@ -222,13 +223,6 @@ function requestBytes(prompt: string, values: AttachmentInput[]): number {
           >
             <span aria-hidden="true">＋</span>
           </button>
-          <details v-if="!session" class="composer-settings">
-            <summary>设置</summary>
-            <div>
-              <span>最大模型决策</span>
-              <Stepper v-model="form.maxSteps" :min="1" :max="100" integer />
-            </div>
-          </details>
         </div>
         <div class="composer-actions">
           <button

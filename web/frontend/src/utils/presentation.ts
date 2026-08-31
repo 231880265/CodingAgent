@@ -16,7 +16,7 @@ export const STOP_REASON_LABELS: Record<StopReason, string> = {
   done_verified: "修改后验证完成",
   done_unverified: "修改后未验证",
   incomplete: "回答未完成",
-  max_steps: "达到步数上限",
+  max_steps: "达到本轮安全预算",
   stuck: "检测到重复调用",
   denied: "用户拒绝操作",
   cancelled: "用户取消本轮",
@@ -92,6 +92,9 @@ export function statusPresentation(
     return { label: STATUS_LABELS[status], tone: "warning" };
   }
   if (status === "FAILED") {
+    if (stopReason === "max_steps") {
+      return { label: "等待继续", tone: "warning" };
+    }
     if (stopReason === "done_unverified") {
       return { label: "已结束 · 验证不足", tone: "warning" };
     }

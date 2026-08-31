@@ -2,6 +2,7 @@
 import { computed } from "vue";
 import { Button } from "vant";
 import type { Approval, ApprovalDecision } from "../types/api";
+import { describeApprovalPurpose } from "../utils/approvalPresentation";
 import { TOOL_LABELS } from "../utils/presentation";
 
 const props = defineProps<{
@@ -24,6 +25,10 @@ const primarySubject = computed(() => {
 });
 const oldText = computed(() => props.approval.tool.args.old_text);
 const newText = computed(() => props.approval.tool.args.new_text);
+const purpose = computed(() => describeApprovalPurpose(
+  props.approval.tool.name,
+  props.approval.tool.args,
+));
 </script>
 
 <template>
@@ -46,6 +51,11 @@ const newText = computed(() => props.approval.tool.args.new_text);
     <div class="approval-subject">
       <strong>{{ toolLabel }}</strong>
       <code>{{ primarySubject }}</code>
+    </div>
+
+    <div class="approval-purpose">
+      <strong>为什么需要这一步</strong>
+      <p>{{ purpose }}</p>
     </div>
 
     <p v-if="approval.dangerReason" class="danger-reason">
@@ -74,7 +84,7 @@ const newText = computed(() => props.approval.tool.args.new_text);
         :disabled="busy"
         @click="emit('resolve', 'DENY')"
       >
-        拒绝
+        拒绝并调整
       </Button>
       <Button
         v-if="approval.allowedDecisions.includes('ALLOW_SESSION')"
@@ -83,7 +93,7 @@ const newText = computed(() => props.approval.tool.args.new_text);
         :disabled="busy"
         @click="emit('resolve', 'ALLOW_SESSION')"
       >
-        本会话同类允许
+        本会话允许同类操作
       </Button>
       <Button
         type="primary"

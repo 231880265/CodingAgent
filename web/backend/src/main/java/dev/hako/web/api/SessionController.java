@@ -6,6 +6,7 @@ import dev.hako.web.api.ApiModels.CancelResponse;
 import dev.hako.web.api.ApiModels.CreateRunRequest;
 import dev.hako.web.api.ApiModels.CreateSessionRequest;
 import dev.hako.web.api.ApiModels.SessionCloseResponse;
+import dev.hako.web.api.ApiModels.SessionSuspendResponse;
 import dev.hako.web.service.SessionService;
 import jakarta.validation.Valid;
 import java.util.UUID;
@@ -13,6 +14,7 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -51,11 +53,24 @@ public class SessionController {
         return ResponseEntity.ok(sessions.getHistory(sessionId));
     }
 
+    @DeleteMapping("/{sessionId}")
+    public ResponseEntity<Void> delete(@PathVariable UUID sessionId) {
+        sessions.deleteSession(sessionId);
+        return ResponseEntity.noContent().build();
+    }
+
     @PostMapping("/{sessionId}/runs")
     public ResponseEntity<?> createRun(
             @PathVariable UUID sessionId,
             @Valid @RequestBody CreateRunRequest request) {
         return ResponseEntity.accepted().body(sessions.createRun(sessionId, request));
+    }
+
+    @PostMapping("/{sessionId}/resume")
+    public ResponseEntity<?> resume(
+            @PathVariable UUID sessionId,
+            @Valid @RequestBody CreateRunRequest request) {
+        return ResponseEntity.accepted().body(sessions.resumeSession(sessionId, request));
     }
 
     @GetMapping(value = "/{sessionId}/events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
@@ -104,6 +119,15 @@ public class SessionController {
     public ResponseEntity<SessionCloseResponse> close(@PathVariable UUID sessionId) {
         SessionCloseResponse result = sessions.closeSession(sessionId);
         HttpStatus status = "CLOSING".equals(result.status())
+                ? HttpStatus.ACCEPTED
+                : HttpStatus.OK;
+        return ResponseEntity.status(status).body(result);
+    }
+
+    @PostMapping("/{sessionId}/suspend")
+    public ResponseEntity<SessionSuspendResponse> suspend(@PathVariable UUID sessionId) {
+        SessionSuspendResponse result = sessions.suspendSession(sessionId);
+        HttpStatus status = "SUSPENDING".equals(result.status())
                 ? HttpStatus.ACCEPTED
                 : HttpStatus.OK;
         return ResponseEntity.status(status).body(result);

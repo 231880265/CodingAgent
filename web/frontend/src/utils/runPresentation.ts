@@ -76,7 +76,13 @@ export function deriveRunPresentation(
     kind = "cancelled";
   } else if (stopReason === "denied") {
     kind = "denied";
-  } else if (stopReason === "error" || terminalStatus === "FAILED" || hasError(runEvents)) {
+  } else if (stopReason === "error" || hasError(runEvents)) {
+    kind = "error";
+  } else if (["max_steps", "stuck", "incomplete"].includes(stopReason ?? "")) {
+    // 这些是内核主动止损，不是 Worker/Agent 崩溃。已经落盘的工作与
+    // Conversation 都仍然有效，用户可以在同一 Session 中继续。
+    kind = "incomplete";
+  } else if (terminalStatus === "FAILED") {
     kind = "error";
   } else {
     kind = "incomplete";

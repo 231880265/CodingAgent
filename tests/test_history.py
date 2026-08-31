@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+import pytest
+
 from hako.history import PLACEHOLDER, Conversation
 
 
@@ -60,6 +62,55 @@ def test_metadata_never_reaches_the_model():
     c.add_tool_result("id1", "read_file", "x", path="a.py")
     message = c.to_messages()[-1]
     assert set(message) == {"role", "tool_call_id", "content"}
+
+
+# ------------------------------------------------------------ 跨 Worker 恢复
+
+
+def test_restore_semantic_rebuilds_user_assistant_pairs_only():
+    c = convo()
+    c.restore_semantic(
+        [
+            {"role": "user", "content": "先定位发布问题"},
+            {"role": "assistant", "content": "根因是线上版本指针未持久化。"},
+            {"role": "user", "content": "再补回归测试"},
+            {"role": "assistant", "content": "已补测试并验证通过。"},
+        ]
+    )
+
+    messages = c.to_messages()
+    assert messages[0] == {"role": "system", "content": "SYS"}
+    assert [message["role"] for message in messages[1:]] == [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+    ]
+    assert all("tool_calls" not in message for message in messages)
+    assert all(message.get("role") != "tool" for message in messages)
+
+
+@pytest.mark.parametrize(
+    "messages",
+    [
+        [{"role": "assistant", "content": "没有对应用户输入"}],
+        [{"role": "user", "content": "没有回答"}],
+        [
+            {"role": "user", "content": "问题"},
+            {"role": "assistant", "content": ""},
+        ],
+    ],
+)
+def test_restore_semantic_rejects_incomplete_or_disordered_history(messages):
+    with pytest.raises(ValueError):
+        convo().restore_semantic(messages)
+
+
+def test_restore_semantic_requires_an_empty_conversation():
+    c = convo()
+    c.add_user("当前 Worker 已有消息")
+    with pytest.raises(ValueError, match="空 Conversation"):
+        c.restore_semantic([])
 
 
 # ------------------------------------------------------------------ 失效

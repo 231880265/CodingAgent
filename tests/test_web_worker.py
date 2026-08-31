@@ -7,6 +7,7 @@ import pytest
 
 from hako import events as ev
 from hako.loop import RunResult, StopReason, VerificationEvidence
+from web.worker.main import _semantic_history
 from web.worker.protocol import (
     PROTOCOL_VERSION,
     ProtocolError,
@@ -125,3 +126,21 @@ def test_input_rejects_wrong_version_and_redacts_secrets() -> None:
     assert "secret-token" not in redact("API_KEY=secret-token")
     fake_key = "sk-" + "abcdefghijklmnop"
     assert fake_key not in redact(f"Bearer {fake_key}")
+
+
+def test_worker_accepts_only_complete_semantic_conversation_pairs() -> None:
+    history = _semantic_history(
+        {
+            "conversation": [
+                {"role": "user", "content": "先定位问题"},
+                {"role": "assistant", "content": "已确认根因"},
+            ]
+        }
+    )
+    assert history == [
+        {"role": "user", "content": "先定位问题"},
+        {"role": "assistant", "content": "已确认根因"},
+    ]
+
+    with pytest.raises(ProtocolError, match="未回答"):
+        _semantic_history({"conversation": [{"role": "user", "content": "悬空输入"}]})

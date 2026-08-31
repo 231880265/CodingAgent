@@ -3,56 +3,53 @@ import { computed } from "vue";
 import type { ToolActivityPair } from "../utils/runPresentation";
 import { formatTime, readPayload } from "../utils/presentation";
 
-const props = withDefaults(defineProps<{
-  activities: ToolActivityPair[];
-  kind?: "read" | "workspace";
-}>(), {
-  kind: "read",
-});
+const props = defineProps<{ activities: ToolActivityPair[] }>();
 
 const rows = computed(() => props.activities.map((activity, index) => {
   const args = readPayload(activity.started?.payload, "args");
   const finished = activity.finished;
-  const touched = stringList(readPayload(finished?.payload, "touchedPaths"));
-  const path = stringValue(readPayload(args, "path")) || touched[0] || `文件 ${index + 1}`;
+  const created = stringList(readPayload(finished?.payload, "createdPaths"));
+  const modified = stringList(readPayload(finished?.payload, "modifiedPaths"));
+  const deleted = stringList(readPayload(finished?.payload, "deletedPaths"));
+  const path = stringValue(readPayload(args, "path"))
+    || created[0]
+    || modified[0]
+    || deleted[0]
+    || `修改 ${index + 1}`;
   const ok = readPayload(finished?.payload, "ok") === true;
-  const detail = stringValue(readPayload(finished?.payload, "detail"));
   const durationMs = readPayload(finished?.payload, "durationMs");
-  const note = activity.notes
-    .map((event) => stringValue(readPayload(event.payload, "text")))
-    .filter(Boolean)
-    .join("\n\n");
   return {
     key: activity.key,
     args,
-    detail,
-    note,
     path,
+    action: created.length ? "创建" : deleted.length ? "删除" : "修改",
     ok,
     pending: finished == null,
+    detail: stringValue(readPayload(finished?.payload, "detail")),
+    note: activity.notes
+      .map((event) => stringValue(readPayload(event.payload, "text")))
+      .filter(Boolean)
+      .join("\n\n"),
     duration: typeof durationMs === "number" ? `${durationMs} ms` : "",
     occurredAt: finished?.occurredAt ?? activity.started?.occurredAt ?? "",
+    oldText: stringValue(readPayload(args, "old_text")),
+    newText: stringValue(readPayload(args, "new_text")),
+    content: stringValue(readPayload(args, "content")),
   };
 }));
 
 const failedCount = computed(() => rows.value.filter((row) => !row.pending && !row.ok).length);
 const pendingCount = computed(() => rows.value.filter((row) => row.pending).length);
+const uniquePathCount = computed(() => new Set(rows.value.map((row) => row.path)).size);
 const latestTime = computed(() => rows.value.at(-1)?.occurredAt ?? "");
 const variant = computed(() => failedCount.value ? "error" : "neutral");
 const marker = computed(() => failedCount.value ? "×" : "›");
 const title = computed(() => {
-  const subject = props.kind === "workspace" ? "个位置" : "个文件";
-  const action = props.kind === "workspace" ? "查看" : "读取";
-  if (pendingCount.value) return `正在${action} ${rows.value.length} ${subject}`;
-  if (failedCount.value) return `${action} ${rows.value.length} ${subject}，${failedCount.value} 个失败`;
-  return `已${action} ${rows.value.length} ${subject}`;
+  if (pendingCount.value) return `正在修改 ${uniquePathCount.value} 个文件`;
+  if (failedCount.value) return `已执行 ${rows.value.length} 次修改，${failedCount.value} 次失败`;
+  if (uniquePathCount.value === rows.value.length) return `已修改 ${uniquePathCount.value} 个文件`;
+  return `已完成 ${rows.value.length} 次修改，涉及 ${uniquePathCount.value} 个文件`;
 });
-const detailLabel = computed(() =>
-  props.kind === "workspace" ? "查看路径与工具详情" : "查看读取文件",
-);
-const stateLabels = computed(() => props.kind === "workspace"
-  ? { pending: "查看中", success: "已查看" }
-  : { pending: "读取中", success: "已读取" });
 
 function stringList(value: unknown): string[] {
   return Array.isArray(value)
@@ -67,11 +64,8 @@ function stringValue(value: unknown): string {
 
 <template>
   <article
-    class="timeline-event tool-activity read-activity-group"
-    :class="{
-      'workspace-activity-group': kind === 'workspace',
-      'is-pending': pendingCount > 0,
-    }"
+    class="timeline-event tool-activity read-activity-group change-activity-group"
+    :class="{ 'is-pending': pendingCount > 0 }"
     :data-variant="variant"
   >
     <div class="event-marker" aria-hidden="true">{{ marker }}</div>
@@ -84,20 +78,32 @@ function stringValue(value: unknown): string {
       </header>
 
       <details class="event-detail read-group-detail">
-        <summary>{{ detailLabel }}</summary>
+        <summary>查看修改文件</summary>
         <ul class="read-file-list">
           <li v-for="row in rows" :key="row.key" class="read-file-item">
             <details>
               <summary>
                 <code>{{ row.path }}</code>
                 <span :data-state="row.pending ? 'pending' : row.ok ? 'success' : 'error'">
-                  {{ row.pending ? stateLabels.pending : row.ok ? stateLabels.success : "失败" }}
+                  {{ row.pending ? `${row.action}中` : row.ok ? `已${row.action}` : `${row.action}失败` }}
                 </span>
               </summary>
               <div class="read-file-detail">
                 <p v-if="row.note" class="agent-note-copy">{{ row.note }}</p>
                 <small v-if="row.duration">耗时 {{ row.duration }}</small>
-                <div v-if="row.args" class="detail-block">
+                <div v-if="row.oldText" class="detail-block code-diff-before">
+                  <span>修改前</span>
+                  <pre>{{ row.oldText }}</pre>
+                </div>
+                <div v-if="row.newText" class="detail-block code-diff-after">
+                  <span>修改后</span>
+                  <pre>{{ row.newText }}</pre>
+                </div>
+                <div v-if="row.content" class="detail-block">
+                  <span>写入内容</span>
+                  <pre>{{ row.content }}</pre>
+                </div>
+                <div v-if="row.args && !row.oldText && !row.newText && !row.content" class="detail-block">
                   <span>工具参数</span>
                   <pre>{{ JSON.stringify(row.args, null, 2) }}</pre>
                 </div>

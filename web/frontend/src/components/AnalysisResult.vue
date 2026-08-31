@@ -10,36 +10,42 @@ import ToolActivity from "./ToolActivity.vue";
 
 type TraceEntry =
   | { kind: "tool"; key: string; activity: ToolActivityPair }
-  | { kind: "read-group"; key: string; activities: ToolActivityPair[] };
+  | { kind: "read-group"; key: string; activities: ToolActivityPair[] }
+  | { kind: "workspace-group"; key: string; activities: ToolActivityPair[] };
 
 const props = defineProps<{ event: HakoEvent; view: RunPresentation }>();
 const traceEntries = computed<TraceEntry[]>(() => {
   const entries: TraceEntry[] = [];
-  let reads: ToolActivityPair[] = [];
-  const flushReads = (): void => {
-    const first = reads[0];
+  let pending: ToolActivityPair[] = [];
+  let pendingTool = "";
+  const flushPending = (): void => {
+    const first = pending[0];
     if (!first) return;
-    if (reads.length === 1) {
+    if (pending.length === 1) {
       entries.push({ kind: "tool", key: first.key, activity: first });
-    } else if (reads.length > 1) {
+    } else {
       entries.push({
-        kind: "read-group",
-        key: `analysis-read-group-${first.key}-${reads.at(-1)?.key}`,
-        activities: reads,
+        kind: pendingTool === "list_dir" ? "workspace-group" : "read-group",
+        key: `analysis-${pendingTool}-group-${first.key}-${pending.at(-1)?.key}`,
+        activities: pending,
       });
     }
-    reads = [];
+    pending = [];
+    pendingTool = "";
   };
 
   for (const activity of props.view.toolActivities) {
-    if (toolName(activity) === "read_file") {
-      reads.push(activity);
+    const name = toolName(activity);
+    if (["read_file", "list_dir"].includes(name)) {
+      if (pendingTool && pendingTool !== name) flushPending();
+      pendingTool = name;
+      pending.push(activity);
       continue;
     }
-    flushReads();
+    flushPending();
     entries.push({ kind: "tool", key: activity.key, activity });
   }
-  flushReads();
+  flushPending();
   return entries;
 });
 
@@ -73,8 +79,9 @@ function toolName(activity: ToolActivityPair): string {
       <div class="analysis-trace-list">
         <template v-for="entry in traceEntries" :key="entry.key">
           <ReadActivityGroup
-            v-if="entry.kind === 'read-group'"
+            v-if="entry.kind === 'read-group' || entry.kind === 'workspace-group'"
             :activities="entry.activities"
+            :kind="entry.kind === 'workspace-group' ? 'workspace' : 'read'"
           />
           <ToolActivity
             v-else

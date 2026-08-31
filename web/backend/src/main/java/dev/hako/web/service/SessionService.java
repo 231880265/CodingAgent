@@ -12,7 +12,9 @@ import dev.hako.web.api.ApiModels.CancelResponse;
 import dev.hako.web.api.ApiModels.CreateRunRequest;
 import dev.hako.web.api.ApiModels.CreateSessionRequest;
 import dev.hako.web.api.ApiModels.HealthResponse;
+import dev.hako.web.api.ApiModels.RunOptions;
 import dev.hako.web.api.ApiModels.SessionCloseResponse;
+import dev.hako.web.api.ApiModels.SessionSuspendResponse;
 import dev.hako.web.api.ApiModels.WorkerHealth;
 import dev.hako.web.config.WebProperties;
 import dev.hako.web.domain.BufferedEvent;
@@ -102,15 +104,17 @@ public class SessionService {
 
     public ObjectNode createSession(CreateSessionRequest request) {
         String prompt = request.prompt().trim();
-        int maxSteps = request.options() == null ? 40 : request.options().valueOrDefault();
+        int maxSteps = request.options() == null
+                ? RunOptions.DEFAULT_WEB_SAFETY_BUDGET
+                : request.options().valueOrDefault();
         Path workspace = validateWorkspace(request.workspace());
         List<AttachmentInput> attachments = validateAttachments(request.attachments());
         synchronized (lock) {
-            if (current != null && !current.status.isTerminal()) {
+            if (current != null && !current.status.isDetached()) {
                 throw new ApiException(
                         HttpStatus.CONFLICT,
                         "SESSION_CONFLICT",
-                        "当前 Session 尚未关闭；请先完成关闭流程再新建会话。");
+                        "当前 Session 尚未挂起；请先完成挂起流程再新建会话。");
             }
             if (current != null) {
                 completeSubscribersLocked(current);
@@ -152,6 +156,30 @@ public class SessionService {
         return stored;
     }
 
+    public void deleteSession(UUID sessionId) {
+        synchronized (lock) {
+            if (history.getHistory(sessionId) == null) {
+                throw new ApiException(
+                        HttpStatus.NOT_FOUND,
+                        "SESSION_NOT_FOUND",
+                        "历史 Session 不存在。");
+            }
+            if (current != null && current.sessionId.equals(sessionId)) {
+                if (current.currentRun != null && current.currentRun.status.isActive()) {
+                    throw new ApiException(
+                            HttpStatus.CONFLICT,
+                            "RUN_CONFLICT",
+                            "当前任务仍在运行，请先停止本轮再删除会话。");
+                }
+                SessionState removed = current;
+                current = null;
+                completeSubscribersLocked(removed);
+                closeWorker(removed);
+            }
+            history.deleteSession(sessionId);
+        }
+    }
+
     public ObjectNode createRun(UUID sessionId, CreateRunRequest request) {
         String prompt = request.prompt().trim();
         List<AttachmentInput> attachments = validateAttachments(request.attachments());
@@ -175,7 +203,9 @@ public class SessionService {
                         "SESSION_WORKER_UNAVAILABLE",
                         "Session 的 Worker 已不可用，请新建会话。");
             }
-            int fallback = session.currentRun == null ? 40 : session.currentRun.maxSteps;
+            int fallback = session.currentRun == null
+                    ? RunOptions.DEFAULT_WEB_SAFETY_BUDGET
+                    : session.currentRun.maxSteps;
             int maxSteps = request.options() == null
                     ? fallback
                     : request.options().valueOrDefault();
@@ -191,22 +221,95 @@ public class SessionService {
         }
     }
 
-    public ObjectNode getRunSummary(UUID sessionId, UUID runId) {
+    public ObjectNode resumeSession(UUID sessionId, CreateRunRequest request) {
+        String prompt = request.prompt().trim();
+        List<AttachmentInput> attachments = validateAttachments(request.attachments());
         synchronized (lock) {
-            RunState run = requireRun(requireSession(sessionId), runId);
-            if (!run.status.isTerminal()) {
+            if (current != null && !current.status.isDetached()) {
                 throw new ApiException(
                         HttpStatus.CONFLICT,
-                        "RUN_NOT_FINISHED",
-                        "Run 仍在运行，摘要尚不可用。");
+                        "SESSION_CONFLICT",
+                        "当前 Session 仍在运行；请先挂起后再恢复其他会话。");
             }
-            if (run.summary == null) {
+            ObjectNode stored = history.getResumeSnapshot(sessionId);
+            if (stored == null) {
                 throw new ApiException(
-                        HttpStatus.INTERNAL_SERVER_ERROR,
-                        "INTERNAL_ERROR",
-                        "终态 Run 缺少结构化摘要。");
+                        HttpStatus.NOT_FOUND,
+                        "SESSION_NOT_FOUND",
+                        "历史 Session 不存在。");
             }
-            return run.summary.deepCopy();
+            if (!SessionStatus.SUSPENDED.name().equals(stored.path("status").asText())) {
+                throw new ApiException(
+                        HttpStatus.CONFLICT,
+                        "SESSION_NOT_SUSPENDED",
+                        "只有已挂起的 Session 可以恢复继续。");
+            }
+            Path workspace = validateWorkspace(stored.path("workspace").asText());
+            int fallback = stored.path("lastMaxSteps").asInt(RunOptions.DEFAULT_WEB_SAFETY_BUDGET);
+            int maxSteps = request.options() == null
+                    ? fallback
+                    : request.options().valueOrDefault();
+            if (current != null) {
+                completeSubscribersLocked(current);
+                closeWorker(current);
+            }
+            SessionState session = new SessionState(
+                    sessionId,
+                    workspace,
+                    parseInstant(stored.path("createdAt").asText(), "createdAt"),
+                    stored.path("runCount").asInt(0),
+                    stored.path("nextEventId").asLong(1),
+                    stored.path("conversation"),
+                    prompt,
+                    maxSteps,
+                    attachments);
+            current = session;
+            history.saveSession(session);
+            history.saveRun(session, session.currentRun);
+            publishSessionStatusLocked(
+                    session,
+                    SessionStatus.SUSPENDED,
+                    SessionStatus.OPENING,
+                    "正在重建 Conversation 并启动新 Worker");
+            publishRunStatusLocked(
+                    session,
+                    session.currentRun,
+                    null,
+                    RunStatus.PENDING,
+                    "恢复历史语义上下文后创建后续 Run");
+            controlExecutor.submit(() -> launch(session));
+            return session.resource(mapper);
+        }
+    }
+
+    public ObjectNode getRunSummary(UUID sessionId, UUID runId) {
+        synchronized (lock) {
+            if (current != null && current.sessionId.equals(sessionId)) {
+                RunState run = current.run(runId);
+                if (run != null) {
+                    if (!run.status.isTerminal()) {
+                        throw new ApiException(
+                                HttpStatus.CONFLICT,
+                                "RUN_NOT_FINISHED",
+                                "Run 仍在运行，摘要尚不可用。");
+                    }
+                    if (run.summary == null) {
+                        throw new ApiException(
+                                HttpStatus.INTERNAL_SERVER_ERROR,
+                                "INTERNAL_ERROR",
+                                "终态 Run 缺少结构化摘要。");
+                    }
+                    return run.summary.deepCopy();
+                }
+            }
+            ObjectNode stored = history.getRunSummary(sessionId, runId);
+            if (stored == null) {
+                throw new ApiException(
+                        HttpStatus.NOT_FOUND,
+                        "RUN_NOT_FOUND",
+                        "Run 不存在或摘要尚不可用。");
+            }
+            return stored;
         }
     }
 
@@ -319,6 +422,18 @@ public class SessionService {
             if (session.status == SessionStatus.CLOSING) {
                 return new SessionCloseResponse(PROTOCOL_VERSION, sessionId, "CLOSING");
             }
+            if (session.status == SessionStatus.SUSPENDED) {
+                session.closedAt = Instant.now();
+                transitionSessionLocked(session, SessionStatus.CLOSED, "Session 已归档");
+                completeSubscribersLocked(session);
+                return new SessionCloseResponse(PROTOCOL_VERSION, sessionId, "CLOSED");
+            }
+            if (session.status == SessionStatus.SUSPENDING) {
+                throw new ApiException(
+                        HttpStatus.CONFLICT,
+                        "SESSION_SUSPENDING",
+                        "Session 正在挂起，请等待完成后再归档。");
+            }
             if (session.currentRun != null && session.currentRun.status.isActive()) {
                 throw new ApiException(
                         HttpStatus.CONFLICT,
@@ -335,6 +450,44 @@ public class SessionService {
                         forced -> controlExecutor.submit(() -> finishSessionClose(session, forced)));
             }
             return new SessionCloseResponse(PROTOCOL_VERSION, sessionId, "CLOSING");
+        }
+    }
+
+    public SessionSuspendResponse suspendSession(UUID sessionId) {
+        synchronized (lock) {
+            SessionState session = requireSession(sessionId);
+            if (session.status == SessionStatus.SUSPENDED) {
+                return new SessionSuspendResponse(PROTOCOL_VERSION, sessionId, "SUSPENDED");
+            }
+            if (session.status == SessionStatus.SUSPENDING) {
+                return new SessionSuspendResponse(PROTOCOL_VERSION, sessionId, "SUSPENDING");
+            }
+            if (session.status.isTerminal()) {
+                return new SessionSuspendResponse(
+                        PROTOCOL_VERSION,
+                        sessionId,
+                        session.status.name());
+            }
+            if (session.currentRun != null && session.currentRun.status.isActive()) {
+                throw new ApiException(
+                        HttpStatus.CONFLICT,
+                        "RUN_CONFLICT",
+                        "当前 Run 仍在运行；请先取消并等待 CANCELLED。");
+            }
+            transitionSessionLocked(
+                    session,
+                    SessionStatus.SUSPENDING,
+                    "正在保存会话并停止 Worker");
+            WorkerSession worker = session.worker;
+            if (worker == null || !worker.isAlive()) {
+                controlExecutor.submit(() -> finishSessionSuspend(session, false));
+            } else {
+                worker.terminate(
+                        properties.getKillGracePeriod(),
+                        forced -> controlExecutor.submit(
+                                () -> finishSessionSuspend(session, forced)));
+            }
+            return new SessionSuspendResponse(PROTOCOL_VERSION, sessionId, "SUSPENDING");
         }
     }
 
@@ -357,7 +510,7 @@ public class SessionService {
                 for (BufferedEvent event : session.eventsAfter(requestedAfter)) {
                     sendEvent(emitter, event);
                 }
-                if (session.status.isTerminal()) {
+                if (session.status.isTerminal() || session.status == SessionStatus.SUSPENDED) {
                     emitter.complete();
                     return emitter;
                 }
@@ -427,7 +580,10 @@ public class SessionService {
     private void handleWorkerMessage(SessionState session, JsonNode message) {
         synchronized (lock) {
             // 旧 Session 的回调在服务端第一道丢弃，不能触碰新 Session。
-            if (current != session || session.status.isTerminal()) {
+            if (current != session
+                    || session.status.isTerminal()
+                    || session.status == SessionStatus.SUSPENDING
+                    || session.status == SessionStatus.SUSPENDED) {
                 return;
             }
             try {
@@ -496,6 +652,11 @@ public class SessionService {
         payload.put("workspace", session.workspace.toString());
         payload.put("prompt", run.prompt);
         payload.put("maxSteps", run.maxSteps);
+        if (session.restoredConversation != null && session.restoredConversation.isArray()) {
+            payload.set("conversation", session.restoredConversation.deepCopy());
+        } else {
+            payload.set("conversation", mapper.createArrayNode());
+        }
         putAttachments(payload, run.attachments);
         sendWorkerLocked(session, message, "无法发送 Worker start 消息。");
         session.startSent = true;
@@ -797,7 +958,13 @@ public class SessionService {
 
     private void workerExited(SessionState session, int exitCode, String stderrTail) {
         synchronized (lock) {
-            if (current != session || session.status.isTerminal()) {
+            if (current != session
+                    || session.status.isTerminal()
+                    || session.status == SessionStatus.SUSPENDED) {
+                return;
+            }
+            if (session.status == SessionStatus.SUSPENDING) {
+                finishSessionSuspendLocked(session, false);
                 return;
             }
             if (session.status == SessionStatus.CLOSING) {
@@ -874,6 +1041,30 @@ public class SessionService {
         closeWorker(session);
         session.closedAt = Instant.now();
         transitionSessionLocked(session, SessionStatus.CLOSED, "Worker 已退出，Session 已关闭");
+        completeSubscribersLocked(session);
+    }
+
+    private void finishSessionSuspend(SessionState session, boolean forced) {
+        synchronized (lock) {
+            finishSessionSuspendLocked(session, forced);
+        }
+    }
+
+    private void finishSessionSuspendLocked(SessionState session, boolean forced) {
+        if (current != session || session.status != SessionStatus.SUSPENDING) {
+            return;
+        }
+        ObjectNode exited = mapper.createObjectNode();
+        exited.put("workerId", session.workerId.toString());
+        exited.put("forced", forced);
+        exited.put("expected", true);
+        publishSessionEventLocked(session, "worker_exited", "WEB", exited);
+        closeWorker(session);
+        session.closedAt = null;
+        transitionSessionLocked(
+                session,
+                SessionStatus.SUSPENDED,
+                "Worker 已停止；会话可从持久化 Conversation 继续");
         completeSubscribersLocked(session);
     }
 
@@ -1232,6 +1423,20 @@ public class SessionService {
         if (session.worker != null) {
             session.worker.close();
             session.worker = null;
+        }
+        session.workerPid = null;
+        session.workerReady = false;
+        session.startSent = false;
+    }
+
+    private static Instant parseInstant(String raw, String field) {
+        try {
+            return Instant.parse(raw);
+        } catch (RuntimeException exc) {
+            throw new ApiException(
+                    HttpStatus.INTERNAL_SERVER_ERROR,
+                    "HISTORY_CORRUPTED",
+                    "历史 Session 的 " + field + " 无效。");
         }
     }
 

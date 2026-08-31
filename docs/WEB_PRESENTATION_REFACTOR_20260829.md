@@ -41,7 +41,7 @@ npm test
 npm run build
 ```
 
-结果：3 个测试文件、20 条测试全部通过；Vue TypeScript 检查通过；Vite 生产构建通过（319 modules transformed）。测试覆盖普通省会问答、Java/C++ Markdown 长回答、仓库只读分析、带变更与验证的修改、DONE_UNVERIFIED、ERROR、CANCELLED、DENIED、INCOMPLETE，以及 DONE_VERIFIED 缺证据时不得显示为 Verified。
+结果：专项前端测试、Vue TypeScript 检查与 Vite 生产构建均通过。测试覆盖普通省会问答、Java/C++ Markdown 长回答、仓库只读分析、带变更与验证的修改、DONE_UNVERIFIED、ERROR、CANCELLED、DENIED、INCOMPLETE，以及 DONE_VERIFIED 缺证据时不得显示为 Verified。当前统一测试数字见 `PROJECT_STATUS.md`。
 
 浏览器使用 Fake Worker 完成 `read → edit → test → done_verified` 闭环，最终页面只在 Verified Result 使用绿色强调；工具参数和原始证据默认折叠；浏览器控制台没有 error/warning。Real Worker 与 Fake Worker 都通过同一个前端事件选择器，不存在两套展示判断。
 
@@ -51,4 +51,4 @@ npm run build
 
 工具活动现在统一位于对应 `.assistant-message > .assistant-content > .assistant-activity-stream` 下并再缩进一级；参数、stdout/stderr、修改前后内容仍是工具内部的二级 `details`。`VerifiedResult`、Analysis Result 与非成功 Outcome 同样位于 hako response 末尾，不再成为独立顶层消息。普通聊天只保留 User → hako Markdown，Coding Task 则在同一 hako response 中增加执行轨迹和结果。
 
-新增 `RunTimeline.test.ts` 验证三项结构不变量：User 必须先于 hako、工具和 Verified Result 必须是 hako response 后代、Repository Analysis 的调查轨迹必须留在对应回复内。最终验证为 4 个测试文件、23 条测试全部通过，`vue-tsc --noEmit` 与 Vite 生产构建通过（319 modules transformed）；并用历史普通问答与 mergesort 工程任务分别完成浏览器验收。全程未修改 Agent、Worker 或后端文件。
+新增 `RunTimeline.test.ts` 验证三项结构不变量：User 必须先于 hako、工具和 Verified Result 必须是 hako response 后代、Repository Analysis 的调查轨迹必须留在对应回复内。专项测试、`vue-tsc --noEmit` 与 Vite 生产构建通过，并用历史普通问答与 mergesort 工程任务分别完成浏览器验收。全程未修改 Agent、Worker 或后端文件；当前统一测试数字见 `PROJECT_STATUS.md`。

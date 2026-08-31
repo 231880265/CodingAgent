@@ -163,12 +163,16 @@ function stringValue(value: unknown): string {
 </script>
 
 <template>
-  <article class="timeline-event tool-activity" :data-variant="variant">
+  <article
+    class="timeline-event tool-activity"
+    :class="{ 'is-pending': !finished }"
+    :data-variant="variant"
+  >
     <div class="event-marker" aria-hidden="true">{{ marker }}</div>
     <div class="event-content">
       <header class="event-header">
         <div class="event-title-row">
-          <strong>{{ title }}</strong>
+          <strong>{{ title }}<span v-if="!finished" class="progress-dots" aria-hidden="true">...</span></strong>
           <code v-if="subject" class="event-subject" :title="subject">{{ subject }}</code>
         </div>
         <time v-if="source" class="event-meta" :datetime="source.occurredAt">{{ formatTime(source.occurredAt) }}</time>

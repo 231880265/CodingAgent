@@ -1,4 +1,11 @@
-export type SessionStatus = "OPENING" | "OPEN" | "CLOSING" | "CLOSED" | "FAILED";
+export type SessionStatus =
+  | "OPENING"
+  | "OPEN"
+  | "SUSPENDING"
+  | "SUSPENDED"
+  | "CLOSING"
+  | "CLOSED"
+  | "FAILED";
 export type RunStatus =
   | "PENDING"
   | "RUNNING"
@@ -114,7 +121,7 @@ export interface SessionResource {
     workerId: string;
     pid: number | null;
     alive: boolean;
-    status: "NOT_STARTED" | "STARTING" | "READY" | "EXITED";
+    status: "NOT_STARTED" | "STARTING" | "READY" | "STOPPING" | "EXITED";
   };
   currentRun: RunResource;
   links: {
@@ -214,6 +221,12 @@ export interface SessionCloseResponse {
   status: "CLOSING" | "CLOSED" | "FAILED";
 }
 
+export interface SessionSuspendResponse {
+  schemaVersion: "1.0";
+  sessionId: string;
+  status: "SUSPENDING" | "SUSPENDED" | "CLOSED" | "FAILED";
+}
+
 export interface SessionHistoryItem {
   sessionId: string;
   workspace: string;
@@ -254,6 +267,7 @@ export interface HakoGateway {
   checkHealth(): Promise<HealthResponse>;
   createSession(request: CreateSessionRequest): Promise<SessionResource>;
   createRun(sessionId: string, request: CreateRunRequest): Promise<SessionResource>;
+  resumeSession(sessionId: string, request: CreateRunRequest): Promise<SessionResource>;
   getSession(sessionId: string): Promise<SessionResource>;
   streamSessionEvents(sessionId: string, handlers: GatewayEventHandlers): () => void;
   respondApproval(
@@ -264,6 +278,8 @@ export interface HakoGateway {
   ): Promise<ApprovalResponse>;
   cancelRun(sessionId: string, runId: string): Promise<CancelResponse>;
   closeSession(sessionId: string): Promise<SessionCloseResponse>;
+  suspendSession(sessionId: string): Promise<SessionSuspendResponse>;
+  deleteSession(sessionId: string): Promise<void>;
   getRunSummary(sessionId: string, runId: string): Promise<RunSummary>;
   listSessionHistory(): Promise<SessionHistoryList>;
   getSessionHistory(sessionId: string): Promise<SessionHistory>;

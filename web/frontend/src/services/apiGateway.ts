@@ -14,6 +14,7 @@ import type {
   SessionHistory,
   SessionHistoryList,
   SessionResource,
+  SessionSuspendResponse,
 } from "../types/api";
 
 const SSE_EVENT_TYPES: HakoEventType[] = [
@@ -66,6 +67,13 @@ export class ApiGateway implements HakoGateway {
   createRun(sessionId: string, request: CreateRunRequest): Promise<SessionResource> {
     return this.request<SessionResource>(
       `/sessions/${encodeURIComponent(sessionId)}/runs`,
+      { method: "POST", body: JSON.stringify(request) },
+    );
+  }
+
+  resumeSession(sessionId: string, request: CreateRunRequest): Promise<SessionResource> {
+    return this.request<SessionResource>(
+      `/sessions/${encodeURIComponent(sessionId)}/resume`,
       { method: "POST", body: JSON.stringify(request) },
     );
   }
@@ -126,6 +134,19 @@ export class ApiGateway implements HakoGateway {
     );
   }
 
+  suspendSession(sessionId: string): Promise<SessionSuspendResponse> {
+    return this.request<SessionSuspendResponse>(
+      `/sessions/${encodeURIComponent(sessionId)}/suspend`,
+      { method: "POST" },
+    );
+  }
+
+  deleteSession(sessionId: string): Promise<void> {
+    return this.request<void>(`/sessions/${encodeURIComponent(sessionId)}`, {
+      method: "DELETE",
+    });
+  }
+
   getRunSummary(sessionId: string, runId: string): Promise<RunSummary> {
     return this.request<RunSummary>(
       `/sessions/${encodeURIComponent(sessionId)}/runs/${encodeURIComponent(runId)}/summary`,
@@ -161,6 +182,7 @@ export class ApiGateway implements HakoGateway {
       }
       throw new Error(message);
     }
+    if (response.status === 204) return undefined as T;
     return (await response.json()) as T;
   }
 }

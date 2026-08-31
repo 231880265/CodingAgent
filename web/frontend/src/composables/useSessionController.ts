@@ -57,7 +57,7 @@ export function useSessionController() {
     if (!progress?.usedTokens || !progress.contextLimit) return 0;
     return Math.min(100, (progress.usedTokens / progress.contextLimit) * 100);
   });
-  const displayedEvents = computed(() => selectedHistory.value?.events ?? events.value);
+  const displayedEvents = computed(() => events.value);
   const viewingHistory = computed(() => selectedHistory.value !== null);
 
   async function initialize(): Promise<void> {
@@ -76,7 +76,11 @@ export function useSessionController() {
         try {
           await restoreSession(sessionId);
         } catch {
-          forgetSessionInUrl();
+          try {
+            await openHistory(sessionId);
+          } catch {
+            forgetSessionInUrl();
+          }
         }
       }
     }
@@ -102,12 +106,16 @@ export function useSessionController() {
     if (!session.value) return;
     actionPending.value = true;
     errorMessage.value = "";
-    selectedHistory.value = null;
     try {
-      const updated = await gateway.createRun(session.value.sessionId, request);
+      const restoring = session.value.status === "SUSPENDED";
+      const updated = restoring
+        ? await gateway.resumeSession(session.value.sessionId, request)
+        : await gateway.createRun(session.value.sessionId, request);
       session.value = updated;
+      selectedHistory.value = null;
       summary.value = null;
-      if (!closeStream) connectStream(updated.sessionId);
+      rememberSessionInUrl(updated.sessionId);
+      if (restoring || !closeStream) connectStream(updated.sessionId);
     } catch (error) {
       errorMessage.value = toMessage(error);
     } finally {
@@ -160,6 +168,11 @@ export function useSessionController() {
     errorMessage.value = "";
     const sessionId = session.value.sessionId;
     try {
+      if (session.value.status === "SUSPENDED") {
+        await refreshHistory();
+        clearClosedSession();
+        return;
+      }
       if (session.value.status === "OPENING") {
         await waitForSession(
           sessionId,
@@ -174,11 +187,11 @@ export function useSessionController() {
           (latest) => latest.currentRun.status === "CANCELLED",
         );
       }
-      const response = await gateway.closeSession(sessionId);
-      if (response.status === "CLOSING") {
+      const response = await gateway.suspendSession(sessionId);
+      if (response.status === "SUSPENDING") {
         await waitForSession(
           sessionId,
-          (latest) => latest.status === "CLOSED" || latest.status === "FAILED",
+          (latest) => latest.status === "SUSPENDED" || latest.status === "FAILED",
         );
       }
       await refreshHistory();
@@ -202,8 +215,42 @@ export function useSessionController() {
     actionPending.value = true;
     errorMessage.value = "";
     try {
-      selectedHistory.value = await gateway.getSessionHistory(sessionId);
+      if (session.value?.sessionId === sessionId && session.value.status !== "SUSPENDED") {
+        selectedHistory.value = null;
+        historyOpen.value = false;
+        return;
+      }
+      if (isActive.value) {
+        throw new Error("当前任务仍在运行，请先停止本轮再切换会话。");
+      }
+      if (session.value && session.value.status !== "SUSPENDED") {
+        const activeSessionId = session.value.sessionId;
+        const response = await gateway.suspendSession(activeSessionId);
+        if (response.status === "SUSPENDING") {
+          await waitForSession(
+            activeSessionId,
+            (latest) => latest.status === "SUSPENDED" || latest.status === "FAILED",
+          );
+        }
+      }
+      finishStream();
+      const stored = await gateway.getSessionHistory(sessionId);
+      openStoredConversation(stored);
       historyOpen.value = false;
+    } catch (error) {
+      errorMessage.value = toMessage(error);
+    } finally {
+      actionPending.value = false;
+    }
+  }
+
+  async function deleteHistory(sessionId: string): Promise<void> {
+    actionPending.value = true;
+    errorMessage.value = "";
+    try {
+      await gateway.deleteSession(sessionId);
+      historyItems.value = historyItems.value.filter((item) => item.sessionId !== sessionId);
+      if (session.value?.sessionId === sessionId) clearClosedSession();
     } catch (error) {
       errorMessage.value = toMessage(error);
     } finally {
@@ -214,10 +261,6 @@ export function useSessionController() {
   function toggleHistory(): void {
     historyOpen.value = !historyOpen.value;
     if (historyOpen.value) void refreshHistory();
-  }
-
-  function closeHistoryView(): void {
-    selectedHistory.value = null;
   }
 
   function dismissError(): void {
@@ -234,7 +277,10 @@ export function useSessionController() {
     if (event.type === "session_status") {
       const current = readString(event.payload, "current") as SessionStatus | null;
       if (current) session.value.status = current;
-      if (current === "CLOSED" || current === "FAILED") finishStream();
+      if (["SUSPENDED", "CLOSED", "FAILED"].includes(current ?? "")) {
+        finishStream();
+        void refreshHistory();
+      }
       return;
     }
     if (!event.runId || event.runId !== session.value.currentRun.runId) return;
@@ -317,12 +363,62 @@ export function useSessionController() {
 
   async function restoreSession(sessionId: string): Promise<void> {
     const restored = await gateway.getSession(sessionId);
+    try {
+      seedStoredTimeline(await gateway.getSessionHistory(sessionId));
+    } catch {
+      resetTimeline();
+    }
     session.value = restored;
-    resetTimeline();
-    connectStream(sessionId);
+    selectedHistory.value = null;
+    if (restored.status !== "SUSPENDED") connectStream(sessionId);
     if (restored.currentRun.status && !ACTIVE_RUN_STATES.has(restored.currentRun.status)) {
       summary.value = await gateway.getRunSummary(sessionId, restored.currentRun.runId);
     }
+  }
+
+  function openStoredConversation(stored: SessionHistory): void {
+    const latest = stored.runs.at(-1);
+    if (!latest) throw new Error("历史会话没有可恢复的 Run。");
+    selectedHistory.value = stored;
+    seedStoredTimeline(stored);
+    session.value = {
+      schemaVersion: "1.0",
+      sessionId: stored.sessionId,
+      status: stored.status,
+      workspace: stored.workspace,
+      runCount: stored.runCount,
+      canContinue: stored.status === "SUSPENDED",
+      createdAt: stored.createdAt,
+      closedAt: stored.closedAt,
+      worker: {
+        workerId: stored.workerId,
+        pid: null,
+        alive: false,
+        status: "EXITED",
+      },
+      currentRun: structuredClone(latest),
+      links: {
+        self: `/api/v1/sessions/${stored.sessionId}`,
+        events: `/api/v1/sessions/${stored.sessionId}/events`,
+        runs: `/api/v1/sessions/${stored.sessionId}/runs`,
+        currentSummary: latest.summary
+          ? `/api/v1/sessions/${stored.sessionId}/runs/${latest.runId}/summary`
+          : null,
+      },
+    };
+    rememberSessionInUrl(stored.sessionId);
+  }
+
+  function seedStoredTimeline(stored: SessionHistory): void {
+    const latest = stored.runs.at(-1);
+    events.value = stored.events.map((event) => structuredClone(event));
+    receivedEventIds.clear();
+    for (const event of events.value) receivedEventIds.add(event.eventId);
+    summary.value = latest?.summary ? structuredClone(latest.summary) : null;
+    const modelEvent = [...stored.events]
+      .reverse()
+      .find((event) => event.type === "run_started");
+    model.value = modelEvent ? readString(modelEvent.payload, "model") : null;
   }
 
   function connectStream(sessionId: string): void {
@@ -427,7 +523,7 @@ export function useSessionController() {
     newSession,
     toggleHistory,
     openHistory,
-    closeHistoryView,
+    deleteHistory,
     dismissError,
   };
 }

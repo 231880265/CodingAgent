@@ -4,7 +4,7 @@ import { showConfirmDialog } from "vant";
 import AppHeader from "./components/AppHeader.vue";
 import ApprovalPanel from "./components/ApprovalPanel.vue";
 import RunTimeline from "./components/RunTimeline.vue";
-import SessionHistoryDrawer from "./components/SessionHistoryDrawer.vue";
+import SessionSidebar from "./components/SessionSidebar.vue";
 import TaskComposer from "./components/TaskComposer.vue";
 import { useSessionController } from "./composables/useSessionController";
 import type { CreateRunRequest, CreateSessionRequest } from "./types/api";
@@ -26,8 +26,6 @@ const {
   errorMessage,
   historyItems,
   historyOpen,
-  selectedHistory,
-  viewingHistory,
   initialize,
   startSession,
   createRun,
@@ -36,7 +34,7 @@ const {
   newSession,
   toggleHistory,
   openHistory,
-  closeHistoryView,
+  deleteHistory,
   dismissError,
 } = useSessionController();
 
@@ -72,8 +70,8 @@ async function confirmNewSession(): Promise<void> {
     await showConfirmDialog({
       title: "新建独立会话？",
       message: isActive.value
-        ? "hako 会先取消当前 Run，再等待 Worker 退出。文件修改不回滚，新 Session 的 Conversation 为空。"
-        : "当前 Worker 与 Conversation 会关闭；文件修改保留，新 Session 的上下文为空。",
+        ? "hako 会先停止当前任务，再挂起这段会话。文件修改会保留，以后仍可从左侧恢复继续。"
+        : "当前会话会保存并进入挂起状态。文件修改会保留，以后仍可从左侧恢复继续。",
       confirmButtonText: "新建会话",
       cancelButtonText: "留在当前会话",
       confirmButtonColor: "oklch(48% 0.12 250)",
@@ -81,6 +79,21 @@ async function confirmNewSession(): Promise<void> {
     await newSession();
   } catch {
     // 保留当前 Session。
+  }
+}
+
+async function confirmDeleteSession(sessionId: string): Promise<void> {
+  try {
+    await showConfirmDialog({
+      title: "删除这段会话？",
+      message: "对话与执行记录会永久删除；工作区文件和已经落盘的修改不会被删除或回滚。",
+      confirmButtonText: "删除会话",
+      cancelButtonText: "取消",
+      confirmButtonColor: "oklch(50% 0.16 28)",
+    });
+    await deleteHistory(sessionId);
+  } catch {
+    // 用户保留会话。
   }
 }
 
@@ -98,8 +111,6 @@ onMounted(() => void initialize());
       :model="model"
       :workspace="session?.workspace ?? null"
       :stop-reason="summary?.stopReason ?? null"
-      :busy="actionPending"
-      @new-session="confirmNewSession"
       @history="toggleHistory"
     />
 
@@ -113,51 +124,33 @@ onMounted(() => void initialize());
       <button type="button" aria-label="关闭错误提示" @click="dismissError">关闭</button>
     </div>
 
-    <main class="conversation-main">
-      <section
-        class="conversation-surface"
-        :class="{ 'is-launcher': !session && !viewingHistory }"
-        aria-label="hako 工程对话"
-      >
-        <div v-if="!session && !viewingHistory" class="launcher-view">
-          <div class="launcher-copy">
-            <h1>开始一个 Coding Task</h1>
-            <p>选择工作区，然后描述任务。</p>
-          </div>
-          <TaskComposer
-            :active="isActive"
-            :busy="actionPending"
-            :disabled="false"
-            :mode="gatewayMode"
-            :session="session"
-            @start="submitSession"
-            @continue="submitRun"
-            @cancel="confirmCancel"
-          />
-        </div>
+    <div class="app-body">
+      <SessionSidebar
+        :open="historyOpen"
+        :items="historyItems"
+        :busy="actionPending"
+        :active-session-id="session?.sessionId ?? null"
+        @close="toggleHistory"
+        @select="openHistory"
+        @delete="confirmDeleteSession"
+        @new-session="confirmNewSession"
+      />
 
-        <template v-else>
-          <div v-if="viewingHistory && selectedHistory" class="history-view-banner">
-            <div>
-              <strong>历史 Session · 只读</strong>
-              <span>{{ selectedHistory.workspace }} · {{ selectedHistory.runCount }} Run</span>
+      <main class="conversation-main">
+        <section
+          class="conversation-surface"
+          :class="{ 'is-launcher': !session }"
+          aria-label="hako 工程对话"
+        >
+          <div v-if="!session" class="launcher-view">
+            <div class="launcher-copy">
+              <h1>开始一个 Coding Task</h1>
+              <p>选择工作区，然后描述任务。</p>
             </div>
-            <button type="button" @click="closeHistoryView">返回当前会话</button>
-          </div>
-
-          <RunTimeline :events="displayedEvents" :active="isActive && !viewingHistory" />
-
-          <div class="conversation-dock">
-            <ApprovalPanel
-              v-if="pendingApproval && !viewingHistory"
-              :approval="pendingApproval"
-              :busy="approvalPending"
-              @resolve="resolveApproval"
-            />
             <TaskComposer
               :active="isActive"
               :busy="actionPending"
-              :disabled="viewingHistory"
+              :disabled="false"
               :mode="gatewayMode"
               :session="session"
               @start="submitSession"
@@ -165,16 +158,31 @@ onMounted(() => void initialize());
               @cancel="confirmCancel"
             />
           </div>
-        </template>
-      </section>
-    </main>
 
-    <SessionHistoryDrawer
-      :open="historyOpen"
-      :items="historyItems"
-      :busy="actionPending"
-      @close="toggleHistory"
-      @select="openHistory"
-    />
+          <template v-else>
+            <RunTimeline :events="displayedEvents" :active="isActive" />
+
+            <div class="conversation-dock">
+              <ApprovalPanel
+                v-if="pendingApproval"
+                :approval="pendingApproval"
+                :busy="approvalPending"
+                @resolve="resolveApproval"
+              />
+              <TaskComposer
+                :active="isActive"
+                :busy="actionPending"
+                :disabled="false"
+                :mode="gatewayMode"
+                :session="session"
+                @start="submitSession"
+                @continue="submitRun"
+                @cancel="confirmCancel"
+              />
+            </div>
+          </template>
+        </section>
+      </main>
+    </div>
   </div>
 </template>

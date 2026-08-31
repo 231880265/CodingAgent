@@ -352,7 +352,7 @@ def _run_goal(
     )
 
 
-def _start(message: dict[str, Any]) -> tuple[str, str, str, str, int]:
+def _start(message: dict[str, Any]) -> tuple[str, str, str, str, int, int]:
     if message.get("type") != "start" or not isinstance(message.get("payload"), dict):
         raise ProtocolError("假 Worker 第一条输入必须是 start。")
     payload = message["payload"]
@@ -360,10 +360,20 @@ def _start(message: dict[str, Any]) -> tuple[str, str, str, str, int]:
     run_id = str(payload.get("runId", ""))
     prompt = str(payload.get("prompt", ""))
     workspace = str(payload.get("workspace", ""))
-    max_steps = int(payload.get("maxSteps", 40))
+    max_steps = int(payload.get("maxSteps", 100))
+    conversation = payload.get("conversation", [])
     if not session_id or not run_id or not prompt:
         raise ProtocolError("假 Worker 缺少 Session、Run 或 prompt。")
-    return session_id, run_id, prompt, workspace, max_steps
+    if not isinstance(conversation, list) or len(conversation) % 2 != 0:
+        raise ProtocolError("假 Worker 收到非法 Conversation 快照。")
+    expected = "user"
+    for item in conversation:
+        if not isinstance(item, dict) or item.get("role") != expected:
+            raise ProtocolError("假 Worker 收到乱序 Conversation 快照。")
+        if not isinstance(item.get("content"), str) or not item["content"].strip():
+            raise ProtocolError("假 Worker 收到空 Conversation 消息。")
+        expected = "assistant" if expected == "user" else "user"
+    return session_id, run_id, prompt, workspace, max_steps, len(conversation) // 2
 
 
 def _follow_up(message: dict[str, Any], session_id: str) -> tuple[str, str, int]:
@@ -374,7 +384,7 @@ def _follow_up(message: dict[str, Any], session_id: str) -> tuple[str, str, int]
         raise ProtocolError("假 Worker 收到不匹配的 sessionId。")
     run_id = payload.get("runId")
     prompt = payload.get("prompt")
-    max_steps = payload.get("maxSteps", 40)
+    max_steps = payload.get("maxSteps", 100)
     if not isinstance(run_id, str) or not run_id:
         raise ProtocolError("假 Worker 的 run.runId 不能为空。")
     if not isinstance(prompt, str) or not prompt.strip():
@@ -387,8 +397,10 @@ def _follow_up(message: dict[str, Any], session_id: str) -> tuple[str, str, int]
 def run() -> int:
     writer = ProtocolWriter(sys.stdout)
     writer.ready(os.getpid())
-    session_id, run_id, prompt, workspace, max_steps = _start(read_message(sys.stdin))
-    run_number = 1
+    session_id, run_id, prompt, workspace, max_steps, restored_runs = _start(
+        read_message(sys.stdin)
+    )
+    run_number = restored_runs + 1
     while True:
         _run_goal(
             writer,

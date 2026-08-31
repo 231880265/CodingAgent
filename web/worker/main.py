@@ -82,7 +82,29 @@ def _attachment_context(payload: dict) -> str:
     return "\n\n".join(blocks)
 
 
-def _start_payload(message: dict) -> tuple[str, str, Path, str, int, str]:
+def _semantic_history(payload: dict) -> list[dict[str, str]]:
+    raw = payload.get("conversation", [])
+    if not isinstance(raw, list) or len(raw) > 200:
+        raise ProtocolError("start.conversation 必须是不超过 200 项的数组。")
+    messages: list[dict[str, str]] = []
+    expected = "user"
+    for item in raw:
+        if not isinstance(item, dict):
+            raise ProtocolError("start.conversation 的消息必须是对象。")
+        role = item.get("role")
+        content = item.get("content")
+        if role != expected or not isinstance(content, str) or not content.strip():
+            raise ProtocolError("start.conversation 必须是非空 user/assistant 交替消息。")
+        messages.append({"role": role, "content": content})
+        expected = "assistant" if role == "user" else "user"
+    if expected == "assistant":
+        raise ProtocolError("start.conversation 不能以未回答的 user 消息结束。")
+    return messages
+
+
+def _start_payload(
+    message: dict,
+) -> tuple[str, str, Path, str, int, str, list[dict[str, str]]]:
     if message.get("type") != "start":
         raise ProtocolError("Worker 第一条输入必须是 start。")
     payload = message.get("payload")
@@ -92,7 +114,7 @@ def _start_payload(message: dict) -> tuple[str, str, Path, str, int, str]:
     run_id = payload.get("runId")
     prompt = payload.get("prompt")
     workspace_raw = payload.get("workspace")
-    max_steps = payload.get("maxSteps", 40)
+    max_steps = payload.get("maxSteps", 100)
     if not isinstance(session_id, str) or not session_id:
         raise ProtocolError("start.sessionId 必须是非空字符串。")
     if not isinstance(run_id, str) or not run_id:
@@ -116,6 +138,7 @@ def _start_payload(message: dict) -> tuple[str, str, Path, str, int, str]:
         prompt.strip(),
         max_steps,
         _attachment_context(payload),
+        _semantic_history(payload),
     )
 
 
@@ -131,7 +154,7 @@ def _run_payload(message: dict, session_id: str) -> tuple[str, str, int, str]:
     if not isinstance(run_id, str) or not run_id:
         raise ProtocolError("run.runId 必须是非空字符串。")
     prompt = payload.get("prompt")
-    max_steps = payload.get("maxSteps", 40)
+    max_steps = payload.get("maxSteps", 100)
     if not isinstance(prompt, str) or not prompt.strip():
         raise ProtocolError("run.prompt 必须是非空字符串。")
     if not isinstance(max_steps, int) or isinstance(max_steps, bool) or not 1 <= max_steps <= 100:
@@ -148,7 +171,15 @@ def run() -> int:
     try:
         writer.ready(os.getpid())
         start = read_message(sys.stdin)
-        session_id, run_id, workspace, prompt, max_steps, attachments = _start_payload(start)
+        (
+            session_id,
+            run_id,
+            workspace,
+            prompt,
+            max_steps,
+            attachments,
+            semantic_history,
+        ) = _start_payload(start)
 
         incoming = ApprovalInput(sys.stdin, session_id=session_id)
         incoming.begin_run(run_id)
@@ -169,6 +200,10 @@ def run() -> int:
             approve=approve,
             cancelled=incoming.is_cancelled,
         )
+        try:
+            agent.conversation.restore_semantic(semantic_history)
+        except ValueError as exc:
+            raise ProtocolError(str(exc)) from exc
         while True:
             agent.config.max_steps = max_steps
             active_run[0] = run_id

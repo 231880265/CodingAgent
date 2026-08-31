@@ -1,175 +1,239 @@
 # hako
 
-`hako` 是一个从零实现的 Coding Agent，提供命令行入口与本地 Web 控制台。模型不会直接操作系统，而是通过主循环反复执行“模型决策 → 工具调用 → 结果回传”，直到给出最终答复或触发终止条件。当前重点不是堆功能，而是把工具协议、上下文、权限和失败恢复做成可解释、可测试的工程机制。
+`hako` 是一个面向本地代码仓库的通用 Coding Agent。它可以完成 Bug 修复、小型功能开发、局部重构和补充测试，也能在空目录中创建基础程序；项目重点不是堆叠功能，而是让多轮代码修改具备**状态一致性、修改可控性和完成可信度**。
 
-## 当前状态
-
-已实现一条可真实运行的最小闭环：
-
-- 五个工具：`list_dir`、`read_file`、`edit_file`、`write_file`、`run_command`
-- OpenAI 兼容接口，支持硅基流动、DeepSeek、阿里云百炼和智谱
-- 工具参数修补与校验、错误回传、重复调用检测、步数上限
-- 模型回复截断续跑：保留 `finish_reason`，有限重试后明确 `INCOMPLETE`
-- 文件工具的工作区路径约束、默认拒绝与危险命令逐次审批
-- shell 命令前后净文件副作用审计：区分新增、修改和删除
-- 陈旧读取失效、长工具输出截断与继续读取指针
-- Verified Finish：区分只读完成、已验证完成和未验证修改
-- 可选只读 subagent：独立短上下文，仅能列目录/读文件，主 Agent 保留唯一写入与验证权
-- 事件总线和 inline TUI，兼容 Windows / Linux
-- 本地 Web 控制台：Vue 3 + Vant 4 前端、Spring Boot REST/SSE 控制面；每个 Session 独占一个 Python Worker，同一 Session 可连续执行多个 Run 并共享 Agent + Conversation；支持文本附件、分级审批、仅取消当前 Run、独立新会话、SQLite 只读历史和 Verified Finish 证据摘要
-
-2026-08-27 已用硅基流动 `deepseek-ai/DeepSeek-V4-Flash` 在隔离的临时 Git 仓库完成最新版真实多轮验证：
+模型不会直接接触文件系统。hako 把当前 Conversation 与手写工具 Schema 发送给兼容 OpenAI Tool Calling 的模型，解析模型返回的文本或 `tool_calls`，经过参数校验、路径边界和人工审批后，才在本地读取/修改文件或执行命令。工具结果继续写回 Conversation，直到主循环依据真实执行证据结束。
 
 ```text
-list_dir → read_file × 2 → edit_file → pytest -q (exit=0) → DONE_VERIFIED
+用户任务
+   ↓
+Conversation + tool schemas ──> LLM
+   ↑                              │
+   │                       text / tool_calls
+   │                              ↓
+ToolResult <── 本地工具 <── 解析、校验、审批
+   │
+   ├─ 更新 Conversation，继续决策
+   └─ 事件总线 → CLI / Web / 持久化历史
+
+最后一次业务修改
+   ↓
+新的测试 / 构建 / 静态检查成功
+   ↓
+DONE_VERIFIED
 ```
 
-初始测试为 `2 failed, 1 passed`，Agent 只把折扣公式中的 `1 + percent / 100` 改为 `1 - percent / 100`，测试文件没有变化；内核根据修改后的 `pytest` 成功证据输出 `DONE_VERIFIED`，独立复测为 `3 passed`。本次运行共 5 次模型决策、9,662 tokens、约 51.3 秒。它证明 `edit_file`、真实 tool calling 和 Verified Finish 能端到端闭合；单个样例不能代表任务成功率，后续仍需评测集和消融实验。
+## 为什么这样设计
 
-完整设计辩护见 [DESIGN.md](DESIGN.md)，时间线与待办见 [PROJECT_STATUS.md](PROJECT_STATUS.md)。Web 的 P0/P1 Session/Run 架构见 [docs/WEB_SESSION_RUN_ARCHITECTURE.md](docs/WEB_SESSION_RUN_ARCHITECTURE.md)，需求、接口和联调记录见 [docs/WEB_CONSOLE_REQUIREMENTS.md](docs/WEB_CONSOLE_REQUIREMENTS.md)、[docs/WEB_CONSOLE_API.md](docs/WEB_CONSOLE_API.md) 与 [docs/WEB_BACKEND_COMPLETION.md](docs/WEB_BACKEND_COMPLETION.md)。
+一个 Coding Agent 真正困难的地方，不是让模型输出代码，而是管理一个会变化、会产生副作用、也会失败的工程环境。hako 围绕这条主线实现了四组机制：
+
+1. **上下文一致性**：文件写入后，Conversation 中该文件更早的读取结果立即失效，避免模型继续依据旧版本编辑；长工具输出按预算截断并保留继续读取指针。
+2. **受控精准修改**：`edit_file` 只执行唯一匹配的 search-replace；0 匹配返回近似候选，多匹配拒绝猜测。路径必须位于 Workspace 内，普通副作用需要批准，高风险 shell 命令必须逐次确认。
+3. **可信完成（Verified Finish）**：模型说“完成”不等于任务完成。发生业务文件修改后，必须在最后一次修改之后留下退出码为 0 的受认可测试、构建或检查证据，否则返回 `DONE_UNVERIFIED`。
+4. **可追溯产品层**：事件总线将模型公开说明、工具调用、审批、文件副作用、验证和终止状态交给 CLI 或 Web。Web 以 `Workspace → Session → Run` 管理多轮工程对话，同一 Session 的后续 Run 复用语义 Conversation。
+
+## 已实现能力
+
+- 五个核心工具：`list_dir`、`read_file`、`edit_file`、`write_file`、`run_command`
+- OpenAI 兼容模型接口；配置内置硅基流动、DeepSeek、阿里云百炼和智谱选项
+- Tool Call JSON 有限修补、参数校验、未知/多余参数处理和可恢复错误回传
+- 工作区路径约束、交互命令拦截、超时/取消与子进程树回收
+- shell 执行前后净文件副作用审计，区分作者文件与 `.exe/.class/.jar` 等派生产物
+- 分层终止：只读完成、验证完成、未验证修改、截断未完成、拒绝、取消、错误、重复调用和步数上限
+- 模型回复截断续跑；有限重试后明确返回 `INCOMPLETE`
+- 可选只读 subagent：隔离短上下文，只能列目录和读取文件，不能写入、执行命令或替代主 Agent 验证
+- inline CLI，兼容 Windows / Linux
+- Vue 3 + Vant 4 前端、Spring Boot REST/SSE 控制面、Python JSONL Worker
+- 一 Session 多 Run、仅取消当前 Run、文本附件、SQLite 历史、SUSPENDED 会话语义恢复
+
+核心 Agent 运行时只直接依赖 `openai` 与 `rich`。对话历史、工具定义与本地执行、模型输出解析、循环与终止条件、错误处理、权限和事件总线均在本仓库自行实现；没有使用 LangChain、LlamaIndex、OpenAI Agents SDK、Claude Agent SDK 等 Agent 框架，也没有把文件或命令执行托管给外部 API。
+
+## 真实工程场景
+
+本地脱敏的 PromoOps 电商营销后台用于验证同一个 Session 中连续处理“一个线上 Bug + 一次产品迭代”：
+
+```text
+Run 1：发布 v2 显示成功，但刷新后线上仍读取 v1
+  → 调查 Service / Repository / UoW
+  → 定位 published_revision_id 未持久化
+  → 唯一匹配局部修复
+  → 完整 pytest 通过
+
+Run 2：增加 Priority 与同优先级冲突反馈
+  → 在 Run 1 修改后的仓库继续开发
+  → API、领域逻辑、页面和回归测试共同演进
+  → 公开测试与外部 held-out 验收
+```
+
+Run 1 的一次真实 Web 轨迹包含 14 次模型决策、27 次工具调用和 4 次审批，只修改 `campaign_repository.py`，最终以 `27 passed` 和 `DONE_VERIFIED` 结束。这个样例证明工具协议、局部编辑、失败恢复和完成判定可以端到端闭合；它不代表任意任务成功率。演示仓库、隐藏测试与运行现场保留在本地且不进入公开仓库，脱敏过程记录见 [PromoOps 彩排文档](docs/PROMOOPS_REHEARSAL_20260829.md)。
+
+## 项目结构
+
+```text
+main.py                         CLI 入口与依赖装配
+hako/
+  config.py                     环境变量、模型与运行参数
+  loop.py                       Agent 主循环和分层终止条件
+  llm.py                        模型请求、重试、Tool Call 解析与 JSON 修补
+  history.py                    Conversation 与陈旧读取失效
+  prompt.py                     系统行为约束与运行环境
+  events.py                     内核与呈现层之间的事件总线
+  fs_audit.py                   shell 工作区快照与净副作用比较
+  truncate.py                   工具结果预算、截断和继续读取指针
+  subagent.py                   可选只读调查 Agent
+  tools/
+    base.py                     Tool / ToolResult 契约与路径边界
+    files.py                    list / read / edit / write
+    shell.py                    命令执行、验证分类、超时与高风险门禁
+  ui/                           inline TUI 与审批
+tests/                          Python 单元及集成测试
+web/
+  worker/                       真实 / Fake JSONL Worker
+  backend/                      Spring Boot Session/Run、SSE 与历史持久化
+  frontend/                     Vue 3 对话界面、审批与证据呈现
+docs/                           设计、接口、联调和演示记录
+```
+
+更完整的设计决策、被否决方案、代价和验证见 [DESIGN.md](DESIGN.md)；实现时间线和证据口径见 [PROJECT_STATUS.md](PROJECT_STATUS.md)。
 
 ## 快速开始
 
-项目 CI 使用 Python 3.12。Windows PowerShell：
+### 1. 环境
+
+- Python 3.12
+- 使用 Web 控制台时另需 Java 21
+- Vite 8 要求 Node.js 20.19+ 或 22.12+
+
+Windows PowerShell：
 
 ```powershell
+git clone <公开仓库地址>
+Set-Location CodingAgent
+
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
 
-编辑本地 `.env`，选择一家服务商填写 API Key。`.env` 已被 `.gitignore` 排除，禁止提交到仓库。以硅基流动为例：
+在本地 `.env` 中任选一家模型服务填写 API Key。`.env`、`.hako/`、`.claude/`、`.codex/`、`tmp/`、视频和压缩包均已忽略，不应提交。以硅基流动为例：
 
 ```dotenv
 SILICONFLOW_API_KEY=
+# 可选覆盖
+# HAKO_MODEL=deepseek-ai/DeepSeek-V4-Flash
+# HAKO_BASE_URL=https://api.siliconflow.cn/v1
 ```
 
-只在本地把密钥填到等号右侧。默认会使用 `https://api.siliconflow.cn/v1` 和 `deepseek-ai/DeepSeek-V4-Flash`；可通过 `HAKO_MODEL`、`HAKO_BASE_URL` 覆盖。硅基流动默认关闭长思考以降低工具交互延迟，可用 `HAKO_ENABLE_THINKING=true` 显式开启。公开且不含密钥的全部配置项见 [.env.example](.env.example)。
+公开配置模板见 [.env.example](.env.example)。不要把真实密钥写进 README、源码、测试或提交历史。
 
-复杂的跨日志、跨文件根因调查可在本地 `.env` 加 `HAKO_ENABLE_SUBAGENT=true` 开启一次/任务的只读委派；它默认关闭，子 Agent 不能写文件或运行命令，返回内容也不算验证证据。
+### 2. CLI
 
-执行一次任务：
+执行单个任务：
 
 ```powershell
-.\.venv\Scripts\python.exe main.py -C D:\path\to\repo "修复失败测试并重新运行 pytest"
+.\.venv\Scripts\python.exe main.py -C 'D:\path\to\repo' '修复失败测试并重新运行 pytest'
 ```
 
-不传任务会进入多轮交互模式：
+不提供任务会进入交互模式；同一进程中的多次输入复用 Agent 与 Conversation：
 
 ```powershell
-.\.venv\Scripts\python.exe main.py -C D:\path\to\repo
+.\.venv\Scripts\python.exe main.py -C 'D:\path\to\repo'
 ```
-
-### 本地 Web 控制台
-
-需要 Java 21、Node.js 和仓库内 Python 虚拟环境。在仓库根目录执行一条命令即可同时启动前后端；默认使用真实 Agent，`-AllowedRoot` 决定页面允许选择的仓库范围：
-
-```powershell
-.\start-web.ps1 -AllowedRoot 'D:\path\to\allowed-root'
-```
-
-只验证界面和协议、不调用模型也不修改文件时，使用 Fake Worker：
-
-```powershell
-.\start-web.ps1 -Mode Fake
-```
-
-脚本会检查 Java、Node.js 和 Python 虚拟环境，首次运行自动执行 `npm install`。它先等待后端健康状态达到 `UP`，再启动并确认前端可访问，避免浏览器在 Spring Boot 尚未就绪时得到 HTTP 502；端口已占用、服务提前退出或就绪超时都会给出明确错误并回收本次启动的进程树。看到两个 `ready` 后打开 `http://127.0.0.1:5173`；按 `Ctrl+C` 会同时回收前后端进程。只检查环境而不启动可执行 `.\start-web.ps1 -CheckOnly`。
-
-需要分别观察或调试两个服务时，也可以手动启动。第一个 PowerShell 启动后端：
-
-```powershell
-Set-Location web\backend
-$env:HAKO_REPOSITORY_ROOT=(Resolve-Path ..\..).Path
-$env:HAKO_WEB_ALLOWED_ROOTS='D:\path\to\allowed-root'
-$env:HAKO_PYTHON_EXECUTABLE=(Resolve-Path ..\..\.venv\Scripts\python.exe).Path
-.\mvnw.cmd spring-boot:run
-```
-
-第二个 PowerShell 启动前端 API 模式：
-
-```powershell
-Set-Location web\frontend
-npm install
-$env:VITE_HAKO_MODE='api'
-npm run dev
-```
-
-打开终端输出中的本机地址。后端默认使用真实 `web/worker/main.py`；只想稳定演示协议且不调用模型时，在启动后端前设置 `$env:HAKO_WORKER_ENTRYPOINT='web/worker/fake_worker.py'`。Fake Worker 不读取或修改工作区，不得把它的结果描述成真实 Agent 成功率。
 
 常用参数：
 
 | 参数 | 作用 |
 |---|---|
-| `-C, --workspace` | 指定工作区；文件工具只允许访问该目录内部 |
-| `-v, --verbose` | 展开工具结果与上下文统计 |
+| `-C, --workspace` | 指定 Agent 实际操作的工作目录 |
+| `-v, --verbose` | 展开工具结果和上下文统计 |
 | `-y, --yes` | 自动批准普通写入和命令；高风险命令仍需逐次确认 |
-| `--max-steps` | 覆盖默认 40 次模型决策上限 |
+| `--max-steps` | 覆盖单个 Run 的模型决策安全预算 |
 
-## 运行机制
+### 3. Web 控制台
 
-```text
-用户任务
-  ↓
-Agent 主循环 ──请求──> LLM
-  ↑                    │
-  │                    └─文本 / tool_calls
-  │                               ↓
-对话历史 <──工具结果── 注册表校验 ──> 文件或命令工具
-  │
-事件总线 ──> TUI / 后续评测订阅者
+一条命令同时启动 Spring Boot 后端和 Vue 前端。`-AllowedRoot` 是浏览器允许选择 Workspace 的本地根目录，不是默认操作仓库：
+
+```powershell
+.\start-web.ps1 -AllowedRoot 'D:\path\to\allowed-root'
 ```
 
-关键代码：
+脚本会检查 Python、Java、Node、端口和前端依赖，先等待后端健康，再启动并确认前端可访问。成功后打开 `http://127.0.0.1:5173`；按 `Ctrl+C` 会回收本次启动的前后端进程树。
 
-```text
-main.py                 CLI 入口与依赖装配
-hako/
-  config.py             .env、服务商与运行参数
-  fs_audit.py           shell 工作区快照与净副作用比较
-  loop.py               主循环和分层终止条件
-  llm.py                请求、重试、tool call 解析与 JSON 修补
-  history.py            对话历史与陈旧读取失效
-  truncate.py           工具结果截断和恢复指针
-  events.py             内核与呈现层之间的事件总线
-  prompt.py             系统提示词
-  subagent.py           隔离的只读调查工具与成本回传
-  tools/
-    base.py             工具契约、参数 schema、路径边界
-    files.py            list_dir / read_file / edit_file / write_file
-    shell.py            run_command、超时和交互命令拦截
-  ui/                    inline 渲染、审批和跨平台读键
-tests/                   单元、集成和 CLI 测试
-web/
-  frontend/              Vue 3 + Vant 4 控制台与 Mock/API Gateway
-  backend/               Spring Boot REST/SSE、状态机与 Worker 进程管理
-  worker/                真实/确定性假 Python JSONL Worker
+其他模式：
+
+```powershell
+# 只做环境预检
+.\start-web.ps1 -AllowedRoot 'D:\path\to\allowed-root' -CheckOnly
+
+# 只验证 UI/协议，不调用模型、不修改工作区
+.\start-web.ps1 -Mode Fake
 ```
 
-几个边界需要明确：
+Fake Worker 只用于确定性 UI 和协议测试，不能作为真实模型能力证据。Web 的 Session/Run、取消、迟到事件隔离和恢复语义见 [架构说明](docs/WEB_SESSION_RUN_ARCHITECTURE.md) 与 [恢复完成记录](docs/WEB_SESSION_RESUME_COMPLETION.md)。
 
-- `edit_file` 只执行唯一匹配的局部替换；0 匹配返回候选，多匹配拒绝猜测，`write_file` 仍用于新文件或小文件整体重写。
-- 文件工具会校验路径不能逃出工作区；`run_command` 只固定工作目录并观察命令前后净变化，不是操作系统沙箱。
-- Windows 上 bare `pytest` 由工具自动绑定到启动 hako 的当前 Python；验证注册表同时覆盖常见 Python/Node/Rust/Go/.NET/Java 测试，以及 C/C++、Java 和主流构建工具。
-- 库调用默认拒绝有副作用工具；普通写入/命令可逐次批准或由 `-y` 放行，高风险命令永远逐次确认，非交互环境即使有 `-y` 也拒绝高风险命令。
-- 修改后必须在最后一次业务文件写入之后运行受认可且退出码为 0 的单一测试、构建或检查命令；否则只能得到 `DONE_UNVERIFIED`，CLI 返回失败。`.exe/.class/.jar` 与常见构建目录会作为派生产物展示和审计，但不会反向清空刚成功的构建证据。
-- 当前只做陈旧读取失效与单条工具输出截断，尚未实现长对话 compaction。
-- shell 审计只能观察命令结束时的净变化：同一命令内创建后删除、工作区外副作用及并发进程归因不在证明范围；`.git/.venv/node_modules/tmp` 与常见测试缓存会剪枝。
-- 高风险识别是保守的词法门禁，不是完整 shell 语法分析；同一次模型决策返回的多个工具调用目前串行执行。
-- 本地三场景评测的最大主上下文仅为 0.6241%，list/read 累计执行占墙钟不足 0.1%，因此当前没有为演示而实现 compaction 或工具并发。
-- 只读 subagent 的真实模型机制探针能在 4 步内返回跨文件证据且零写入，但两次自然 EAGLE 运行都未调用它，所以尚无自主采用或性能收益结论。
+## 完成判定
+
+| 结果 | 含义 |
+|---|---|
+| `DONE_READ_ONLY` | 没有作者文件修改，模型正常结束；前端再根据工具事实区分普通问答与仓库分析 |
+| `DONE_VERIFIED` | 有作者文件修改，且最后一次修改后存在成功的测试、构建或静态检查 |
+| `DONE_UNVERIFIED` | 已修改文件，但没有可接受的修改后验证证据 |
+| `INCOMPLETE` | 模型输出被截断且有限续跑仍未完成 |
+| `CANCELLED / DENIED / ERROR / STUCK / MAX_STEPS` | 分别表示取消、拒绝、不可恢复错误、无进展重复或达到安全预算 |
+
+验证命令必须是单一、可审计的执行，例如 `python -m pytest -q`、`npm test`、`mvn test`、`cargo test`、`g++ main.cpp -o main.exe`。包含管道、命令拼接、`|| true` 或仅收集测试的命令不会成为完成证据。任何后续业务文件写入都会让此前验证过期。
 
 ## 测试与 CI
+
+Python 核心：
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-测试覆盖配置选择、路径逃逸、参数修补、上下文失效、截断、终止条件、事件流、CLI 和跨平台行为。GitHub Actions 在 Windows 与 Ubuntu 上使用 Python 3.12 运行同一套测试。真实模型 smoke test 不放进 CI，避免泄露密钥、产生费用和引入外部服务波动。
+Spring Boot：
 
-2026-08-29 最新回归：Python `191 passed, 1 skipped`；Spring Boot `15 passed`；前端 `npm run build` 通过 TypeScript 检查并转换 303 个模块。浏览器另在 `1280×720` 与 `1024×700` 验证页面无外层滚动，并走通同 Session 三个 Run、取消本轮后继续、活动 Run 切换新会话、附件/工作区语义分离及 CLOSED 历史只读复盘。Fake Worker 和本地故障标本不代表真实模型成功率。
+```powershell
+Set-Location web\backend
+.\mvnw.cmd test
+```
 
-## 下一阶段
+前端：
 
-`DESIGN.md` 第一版已经完成，十二项决策均记录问题、选择、否决方案、代价、验证与踩坑。下一步冻结接口与数据口径，审校最终代码/commit 锚点，再准备两分钟演示视频和不超过 1000 汉字的 `README.txt`；不再为了展示继续堆内核功能。当前完成项、证据和逐日安排统一维护在 [PROJECT_STATUS.md](PROJECT_STATUS.md)。
+```powershell
+Set-Location web\frontend
+npm install
+npm test
+npm run build
+```
+
+2026-08-30 在当前工作树复测：
+
+| 范围 | 结果 |
+|---|---|
+| Python | `203 passed, 1 skipped` |
+| Spring Boot | `18 passed` |
+| Vue/Vitest | `34 passed` |
+| 前端生产构建 | TypeScript 检查通过，`324 modules transformed` |
+
+GitHub Actions 在 Windows 与 Ubuntu、Python 3.12 上运行 Python 核心测试。真实模型测试不进入 CI，避免提交密钥、产生外部费用并混入网络服务波动。
+
+## 明确边界
+
+- Verified Finish 只证明最后一次业务修改后某项受认可验证成功，不证明测试覆盖充分，更不是形式化正确性证明。
+- `run_command` 固定 Workspace、执行风险门禁并审计命令结束时的净变化，但不是操作系统沙箱；工作区外副作用和命令内部已经抵消的瞬时变化不可见。
+- 高风险识别是保守词法门禁，不是 PowerShell/sh 完整语法分析；生产级隔离仍应使用容器、虚拟机或独立系统沙箱。
+- 历史恢复只重建成对的用户输入与最终回答，不恢复旧 Worker、模型隐藏状态或过期工具观察；恢复后 Agent 必须重新读取当前仓库。
+- 当前工具串行执行；本地基线中 list/read 耗时不足总墙钟 0.1%，没有把未证明有收益的工具并发包装成卖点。
+- 当前未实现长对话 compaction；本地场景上下文峰值远低于配置阈值，暂不为展示制造虚假需求。
+- 可选只读 subagent 的权限隔离和直接调用已测试，但真实标本中尚无稳定的模型自主采用收益，因此不列为核心卖点。
+
+## 相关文档
+
+- [DESIGN.md](DESIGN.md)：核心设计决策、备选方案、代价与验证
+- [PROJECT_STATUS.md](PROJECT_STATUS.md)：开发时间线、真实结果和当前边界
+- [PRODUCT.md](PRODUCT.md)：产品定位与核心场景
+- [Web API](docs/WEB_CONSOLE_API.md)：REST/SSE 协议
+- [Web 需求](docs/WEB_CONSOLE_REQUIREMENTS.md)：信息架构与产品语义
+- [PromoOps 彩排](docs/PROMOOPS_REHEARSAL_20260829.md)：真实连续工程任务和外部验收记录

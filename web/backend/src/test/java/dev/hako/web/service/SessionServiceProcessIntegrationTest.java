@@ -104,6 +104,34 @@ class SessionServiceProcessIntegrationTest {
     }
 
     @Test
+    void suspendedSessionStartsANewWorkerAndRestoresSemanticConversation() throws Exception {
+        SessionRun first = create("先定位发布问题");
+        approveBoth(first.sessionId(), first.runId());
+        ObjectNode firstDone = awaitRunStatus(first.sessionId(), "COMPLETED");
+        String firstWorkerId = firstDone.path("worker").path("workerId").asText();
+
+        assertEquals("SUSPENDING", service.suspendSession(first.sessionId()).status());
+        ObjectNode suspended = awaitSessionStatus(first.sessionId(), "SUSPENDED");
+        assertFalse(suspended.path("worker").path("alive").asBoolean());
+        assertTrue(suspended.path("canContinue").asBoolean());
+        assertEquals("SUSPENDED", service.getHistory(first.sessionId()).path("status").asText());
+
+        ObjectNode resumed = service.resumeSession(
+                first.sessionId(),
+                new CreateRunRequest("继续补回归测试", List.of(), new RunOptions(8)));
+        UUID secondRunId = runId(resumed);
+        assertEquals(first.sessionId().toString(), resumed.path("sessionId").asText());
+        assertEquals(2, resumed.path("runCount").asInt());
+        assertNotEquals(firstWorkerId, resumed.path("worker").path("workerId").asText());
+
+        approveBoth(first.sessionId(), secondRunId);
+        awaitRunStatus(first.sessionId(), "COMPLETED");
+        assertTrue(service.getRunSummary(first.sessionId(), secondRunId)
+                .path("finalText").asText().contains("上一轮上下文"));
+        assertEquals(2, service.getHistory(first.sessionId()).path("runs").size());
+    }
+
+    @Test
     void cancellingRunKeepsSessionAndWorkerAliveForFollowUp() throws Exception {
         SessionRun first = create("cancel this run");
         ObjectNode waiting = awaitRunStatus(first.sessionId(), "WAITING_APPROVAL");
@@ -170,6 +198,38 @@ class SessionServiceProcessIntegrationTest {
         assertEquals(1, history.path("runs").size());
         assertTrue(history.path("events").size() > 0);
         assertEquals("persist this session", history.path("runs").path(0).path("prompt").asText());
+        assertFalse(service.listHistory().path("sessions").isEmpty());
+    }
+
+    @Test
+    void deletingSuspendedSessionRemovesConversationHistory() throws Exception {
+        SessionRun ids = create("delete this history");
+        ObjectNode waiting = awaitRunStatus(ids.sessionId(), "WAITING_APPROVAL");
+        service.respondApproval(
+                ids.sessionId(), ids.runId(), approvalId(waiting), ApprovalDecision.DENY);
+        awaitRunStatus(ids.sessionId(), "COMPLETED");
+        service.suspendSession(ids.sessionId());
+        awaitSessionStatus(ids.sessionId(), "SUSPENDED");
+
+        service.deleteSession(ids.sessionId());
+
+        assertTrue(service.listHistory().path("sessions").isEmpty());
+        ApiException missing = assertThrows(
+                ApiException.class,
+                () -> service.getHistory(ids.sessionId()));
+        assertEquals("SESSION_NOT_FOUND", missing.code());
+    }
+
+    @Test
+    void deletingSessionWithActiveRunIsRejected() throws Exception {
+        SessionRun ids = create("do not delete while running");
+        awaitRunStatus(ids.sessionId(), "WAITING_APPROVAL");
+
+        ApiException conflict = assertThrows(
+                ApiException.class,
+                () -> service.deleteSession(ids.sessionId()));
+
+        assertEquals("RUN_CONFLICT", conflict.code());
         assertFalse(service.listHistory().path("sessions").isEmpty());
     }
 

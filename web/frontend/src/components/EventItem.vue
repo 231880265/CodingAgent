@@ -30,7 +30,7 @@ const marker = computed(() => {
 });
 const title = computed(() => {
   switch (props.event.type) {
-    case "assistant_text": return "正在决定下一步";
+    case "assistant_text": return "分析进展";
     case "verification_required": return "完成证据不足，继续验证";
     case "continuation_required": return "回答尚未形成行动，继续执行";
     case "approval_required": return "等待你的批准";
@@ -93,7 +93,7 @@ const runMetadata = computed(() => {
 
 function preview(value: string): string {
   const compact = value.replace(/\s+/g, " ").trim();
-  return compact.length > 120 ? `${compact.slice(0, 120)}…` : compact;
+  return compact.length > 220 ? `${compact.slice(0, 220)}…` : compact;
 }
 
 function stringValue(value: unknown): string {
