@@ -75,6 +75,8 @@ def test_tool_finished_payload_exposes_facts_for_web_presentation() -> None:
         derived_paths=("qsort.exe",),
         verification_kind="build",
         verification_command="g++ qsort.cpp -o qsort.exe",
+        command_status="succeeded",
+        exit_code=0,
     )
 
     kind, payload = event_payload(event)
@@ -83,6 +85,8 @@ def test_tool_finished_payload_exposes_facts_for_web_presentation() -> None:
     assert payload["derivedPaths"] == ["qsort.exe"]
     assert payload["verificationKind"] == "build"
     assert payload["verificationCommand"] == "g++ qsort.cpp -o qsort.exe"
+    assert payload["commandStatus"] == "succeeded"
+    assert payload["exitCode"] == 0
 
 
 def test_writer_allocates_contiguous_session_sequence() -> None:

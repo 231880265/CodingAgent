@@ -205,7 +205,10 @@ class Agent:
                         and step < self.config.max_steps
                     ):
                         state.continuation_nudges += 1
-                        self.conversation.add_user(TRUNCATED_CONTINUATION_REQUIRED)
+                        self.conversation.add_user(
+                            TRUNCATED_CONTINUATION_REQUIRED,
+                            semantic=False,
+                        )
                         self.bus.emit(
                             ev.ContinuationRequired(
                                 attempt=state.continuation_nudges,
@@ -228,7 +231,7 @@ class Agent:
                     )
                 if not state.verification_nudged and step < self.config.max_steps:
                     state.verification_nudged = True
-                    self.conversation.add_user(VERIFICATION_REQUIRED)
+                    self.conversation.add_user(VERIFICATION_REQUIRED, semantic=False)
                     self.bus.emit(
                         ev.VerificationRequired(
                             changed_paths=tuple(sorted(state.changed_paths)),
@@ -388,6 +391,8 @@ class Agent:
                     derived_paths=result.derived_paths,
                     verification_kind=result.verification_kind,
                     verification_command=result.verification_command,
+                    command_status=result.command_status,
+                    exit_code=result.exit_code,
                 )
             )
             if self.cancelled():

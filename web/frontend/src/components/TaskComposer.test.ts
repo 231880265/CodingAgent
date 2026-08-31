@@ -15,6 +15,34 @@ afterEach(() => {
 });
 
 describe("TaskComposer Web run policy", () => {
+  it("allows a knowledge question without choosing a workspace", async () => {
+    const requests: CreateSessionRequest[] = [];
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    mountedApp = createApp(TaskComposer, {
+      active: false,
+      busy: false,
+      disabled: false,
+      mode: "api",
+      session: null,
+      onStart: (request: CreateSessionRequest) => requests.push(request),
+    });
+    mountedApp.mount(host);
+
+    const prompt = host.querySelector<HTMLTextAreaElement>("#goal-prompt")!;
+    prompt.value = "Java 的封装、继承和多态是什么？";
+    prompt.dispatchEvent(new Event("input", { bubbles: true }));
+    await nextTick();
+
+    host.querySelector("form")!.dispatchEvent(new Event("submit", {
+      bubbles: true,
+      cancelable: true,
+    }));
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.workspace).toBe("");
+  });
+
   it("hides step configuration and sends the internal Web safety budget", async () => {
     const requests: CreateSessionRequest[] = [];
     const host = document.createElement("div");

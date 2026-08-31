@@ -76,6 +76,8 @@ class ToolCallFinished(Event):
     derived_paths: tuple[str, ...] = ()
     verification_kind: str = ""
     verification_command: str = ""
+    command_status: str = ""
+    exit_code: int | None = None
     kind: str = field(init=False, default="tool_call_finished")
 
 

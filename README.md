@@ -27,7 +27,7 @@ DONE_VERIFIED
 
 一个 Coding Agent 真正困难的地方，不是让模型输出代码，而是管理一个会变化、会产生副作用、也会失败的工程环境。hako 围绕这条主线实现了四组机制：
 
-1. **上下文一致性**：文件写入后，Conversation 中该文件更早的读取结果立即失效，避免模型继续依据旧版本编辑；长工具输出按预算截断并保留继续读取指针。
+1. **上下文一致性**：文件写入后，Conversation 中该文件更早的读取结果立即失效；长工具输出按预算截断并保留继续读取指针。跨 Run 只自动携带最近三组语义对和有界事件事实，旧细节按需检索。
 2. **受控精准修改**：`edit_file` 只执行唯一匹配的 search-replace；0 匹配返回近似候选，多匹配拒绝猜测。路径必须位于 Workspace 内，普通副作用需要批准，高风险 shell 命令必须逐次确认。
 3. **可信完成（Verified Finish）**：模型说“完成”不等于任务完成。发生业务文件修改后，必须在最后一次修改之后留下退出码为 0 的受认可测试、构建或检查证据，否则返回 `DONE_UNVERIFIED`。
 4. **可追溯产品层**：事件总线将模型公开说明、工具调用、审批、文件副作用、验证和终止状态交给 CLI 或 Web。Web 以 `Workspace → Session → Run` 管理多轮工程对话，同一 Session 的后续 Run 复用语义 Conversation。
@@ -45,6 +45,7 @@ DONE_VERIFIED
 - inline CLI，兼容 Windows / Linux
 - Vue 3 + Vant 4 前端、Spring Boot REST/SSE 控制面、Python JSONL Worker
 - 一 Session 多 Run、仅取消当前 Run、文本附件、SQLite 历史、SUSPENDED 会话语义恢复
+- 三层记忆：当前 Conversation、事件确定性生成的 RunMemory、作为当前事实来源的 Workspace；`search_session_history` 可按需查找旧目标、修改、审批、失败和验证
 
 核心 Agent 运行时只直接依赖 `openai` 与 `rich`。对话历史、工具定义与本地执行、模型输出解析、循环与终止条件、错误处理、权限和事件总线均在本仓库自行实现；没有使用 LangChain、LlamaIndex、OpenAI Agents SDK、Claude Agent SDK 等 Agent 框架，也没有把文件或命令执行托管给外部 API。
 
@@ -224,9 +225,9 @@ GitHub Actions 在 Windows 与 Ubuntu、Python 3.12 上运行 Python 核心测�
 - Verified Finish 只证明最后一次业务修改后某项受认可验证成功，不证明测试覆盖充分，更不是形式化正确性证明。
 - `run_command` 固定 Workspace、执行风险门禁并审计命令结束时的净变化，但不是操作系统沙箱；工作区外副作用和命令内部已经抵消的瞬时变化不可见。
 - 高风险识别是保守词法门禁，不是 PowerShell/sh 完整语法分析；生产级隔离仍应使用容器、虚拟机或独立系统沙箱。
-- 历史恢复只重建成对的用户输入与最终回答，不恢复旧 Worker、模型隐藏状态或过期工具观察；恢复后 Agent 必须重新读取当前仓库。
+- 历史恢复只重建最近三组成对的用户输入与最终回答，并注入有界 RunMemory；不恢复旧 Worker、模型隐藏状态或过期工具观察。历史代码细节必须通过工具按需查找并重新读取当前仓库。
 - 当前工具串行执行；本地基线中 list/read 耗时不足总墙钟 0.1%，没有把未证明有收益的工具并发包装成卖点。
-- 当前未实现长对话 compaction；本地场景上下文峰值远低于配置阈值，暂不为展示制造虚假需求。
+- 已实现 Run 边界的确定性裁剪，避免多轮工具日志无限累积；尚未实现运行中根据 token 阈值自动摘要的通用 compaction，因为当前场景没有触发该需求。
 - 可选只读 subagent 的权限隔离和直接调用已测试，但真实标本中尚无稳定的模型自主采用收益，因此不列为核心卖点。
 
 ## 相关文档

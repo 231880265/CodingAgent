@@ -334,6 +334,7 @@ def make_run_command(
                 derived_paths=effects.derived_paths,
                 verification_kind=verification_kind or "",
                 verification_command=requested_command if verification_kind else "",
+                command_status="cancelled",
             )
         except subprocess.TimeoutExpired:
             effects = diff_snapshots(before, snapshot_workspace(workspace))
@@ -360,6 +361,7 @@ def make_run_command(
                     else requested_command if verification_kind
                     else ""
                 ),
+                command_status="timed_out",
             )
         except FileNotFoundError:
             raise ToolError(f"找不到 shell 或命令不存在：{requested_command}") from None
@@ -407,6 +409,8 @@ def make_run_command(
                 else requested_command if verification_kind
                 else ""
             ),
+            command_status="succeeded" if ok else "failed",
+            exit_code=proc.returncode,
         )
 
     return Tool(

@@ -113,6 +113,44 @@ def test_restore_semantic_requires_an_empty_conversation():
         c.restore_semantic([])
 
 
+def test_follow_up_compaction_keeps_recent_pairs_and_drops_tool_observations():
+    c = convo()
+    for index in range(10):
+        c.add_user(f"goal {index}")
+        c.add_assistant("", [FakeCall(f"read-{index}", "read_file", {"path": "a.py"})])
+        c.add_tool_result(f"read-{index}", "read_file", f"old source {index}", path="a.py")
+        c.add_assistant(f"answer {index}", [])
+
+    c.compact_for_follow_up(memory_context="run facts", recent_pairs=3)
+
+    messages = c.to_messages()
+    assert [message["content"] for message in messages if message["role"] == "user"] == [
+        "goal 7",
+        "goal 8",
+        "goal 9",
+    ]
+    assert all(message["role"] != "tool" for message in messages)
+    assert all("old source" not in str(message.get("content")) for message in messages)
+    assert messages[0]["role"] == "system"
+    assert "run facts" in messages[0]["content"]
+
+
+def test_follow_up_compaction_does_not_turn_kernel_nudge_into_user_goal():
+    c = convo()
+    c.add_user("fix checkout bug")
+    c.add_assistant("I changed the repository.", [])
+    c.add_user("run a verification after the latest change", semantic=False)
+    c.add_assistant("Tests pass.", [])
+
+    c.compact_for_follow_up()
+
+    messages = c.to_messages()
+    assert [message["content"] for message in messages if message["role"] == "user"] == [
+        "fix checkout bug"
+    ]
+    assert messages[-1] == {"role": "assistant", "content": "Tests pass."}
+
+
 # ------------------------------------------------------------------ 失效
 
 

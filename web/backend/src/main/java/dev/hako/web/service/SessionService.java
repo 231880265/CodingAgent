@@ -84,6 +84,7 @@ public class SessionService {
     private final ObjectMapper mapper;
     private final WorkerLauncher launcher;
     private final SessionHistoryRepository history;
+    private final RunMemoryBuilder memoryBuilder;
     private final ExecutorService controlExecutor = Executors.newSingleThreadExecutor(
             Thread.ofPlatform().name("hako-web-control-", 0).factory());
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(
@@ -99,6 +100,7 @@ public class SessionService {
         this.mapper = mapper;
         this.launcher = launcher;
         this.history = history;
+        this.memoryBuilder = new RunMemoryBuilder(mapper);
         scheduler.scheduleAtFixedRate(this::heartbeat, 15, 15, TimeUnit.SECONDS);
     }
 
@@ -260,6 +262,7 @@ public class SessionService {
                     stored.path("runCount").asInt(0),
                     stored.path("nextEventId").asLong(1),
                     stored.path("conversation"),
+                    stored.path("memorySnapshot"),
                     prompt,
                     maxSteps,
                     attachments);
@@ -657,6 +660,11 @@ public class SessionService {
         } else {
             payload.set("conversation", mapper.createArrayNode());
         }
+        if (session.restoredMemory != null && session.restoredMemory.isArray()) {
+            payload.set("memorySnapshot", session.restoredMemory.deepCopy());
+        } else {
+            payload.set("memorySnapshot", history.getMemorySnapshot(session.sessionId));
+        }
         putAttachments(payload, run.attachments);
         sendWorkerLocked(session, message, "无法发送 Worker start 消息。");
         session.startSent = true;
@@ -669,6 +677,7 @@ public class SessionService {
         payload.put("runId", run.runId.toString());
         payload.put("prompt", run.prompt);
         payload.put("maxSteps", run.maxSteps);
+        payload.set("memorySnapshot", history.getMemorySnapshot(session.sessionId));
         putAttachments(payload, run.attachments);
         sendWorkerLocked(session, message, "无法把后续 Run 发送给 Worker。");
     }
@@ -886,6 +895,7 @@ public class SessionService {
         run.summary.put("finishedAt", run.finishedAt.toString());
         publishRunEventLocked(session, run, "run_result", "WORKER", run.outcome);
         publishRunStatusLocked(session, run, previous, terminal, reason);
+        captureRunMemoryLocked(session, run);
     }
 
     private void finishRunCancellationLocked(
@@ -917,6 +927,7 @@ public class SessionService {
         ObjectNode cancelled = mapper.createObjectNode();
         cancelled.put("message", "Run 已取消；已落盘修改保留，Session 与 Conversation 继续可用。");
         publishRunEventLocked(session, run, "run_cancelled", "WEB", cancelled);
+        captureRunMemoryLocked(session, run);
         publishRunStatusLocked(
                 session,
                 run,
@@ -948,6 +959,15 @@ public class SessionService {
         run.summary = run.failureSummary(mapper, session.sessionId, code, message);
         run.outcome = outcomeFromSummary(run.summary);
         publishRunStatusLocked(session, run, previous, RunStatus.FAILED, message);
+        captureRunMemoryLocked(session, run);
+    }
+
+    private void captureRunMemoryLocked(SessionState session, RunState run) {
+        run.runMemory = memoryBuilder.build(
+                session.sessionId,
+                run,
+                history.getRunEvents(session.sessionId, run.runId));
+        history.saveRun(session, run);
     }
 
     private void protocolFailure(SessionState session, String message) {
@@ -1284,9 +1304,20 @@ public class SessionService {
     }
 
     private Path validateWorkspace(String raw) {
+        String selected = raw;
+        if (selected == null || selected.isBlank()) {
+            Path repositoryRoot = properties.getRepositoryRoot().toAbsolutePath().normalize();
+            selected = properties.getAllowedRoots().stream()
+                    .findFirst()
+                    .map(root -> root.isAbsolute()
+                            ? root
+                            : repositoryRoot.resolve(root).normalize())
+                    .orElse(repositoryRoot)
+                    .toString();
+        }
         final Path candidate;
         try {
-            candidate = Path.of(raw.trim());
+            candidate = Path.of(selected.trim());
         } catch (InvalidPathException exc) {
             throw new ApiException(
                     HttpStatus.BAD_REQUEST,

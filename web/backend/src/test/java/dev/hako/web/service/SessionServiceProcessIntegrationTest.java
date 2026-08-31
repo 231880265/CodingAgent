@@ -69,6 +69,15 @@ class SessionServiceProcessIntegrationTest {
     }
 
     @Test
+    void blankWorkspaceUsesTheConfiguredAllowedRoot() {
+        ObjectNode resource = service.createSession(new CreateSessionRequest(
+                "", "knowledge question", List.of(), new RunOptions(8)));
+
+        assertEquals(workspace.toAbsolutePath().normalize().toString(),
+                resource.path("workspace").asText());
+    }
+
+    @Test
     void completesAValidatedRunAndReturnsEvidence() throws Exception {
         SessionRun ids = create("fix header normalization and verify");
         approveBoth(ids.sessionId(), ids.runId());
@@ -80,6 +89,11 @@ class SessionServiceProcessIntegrationTest {
         assertEquals("done_verified", summary.path("stopReason").asText());
         assertEquals("router/headers.py", summary.path("changedPaths").path(0).asText());
         assertEquals("test", summary.path("verification").path(0).path("kind").asText());
+        ObjectNode memory = (ObjectNode) service.getHistory(ids.sessionId())
+                .path("runs").path(0).path("runMemory");
+        assertEquals("fix header normalization and verify", memory.path("userGoal").asText());
+        assertEquals(0, memory.path("verifications").path(0).path("exitCode").asInt(-1));
+        assertFalse(memory.path("semanticSummary").path("authoritative").asBoolean(true));
     }
 
     @Test

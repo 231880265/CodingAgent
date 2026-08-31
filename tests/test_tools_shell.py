@@ -114,6 +114,8 @@ def test_exit_code_reported(registry: Registry):
     code = "exit 3"
     result = run(registry, code)
     assert "exit=3" in result.detail
+    assert result.command_status == "failed"
+    assert result.exit_code == 3
 
 
 def test_utf8_output_not_mojibake(registry: Registry, workspace: Path):

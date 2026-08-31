@@ -30,6 +30,7 @@ public final class RunState {
     public ObjectNode outcome;
     public ObjectNode error;
     public ObjectNode summary;
+    public ObjectNode runMemory;
     public ObjectNode runFinished;
     public boolean resultReceived;
     public boolean approvalResponseSent;
@@ -89,6 +90,7 @@ public final class RunState {
         setNullable(run, "pendingApproval", pendingApproval);
         setNullable(run, "outcome", outcome);
         setNullable(run, "error", error);
+        setNullable(run, "runMemory", runMemory);
         return run;
     }
 

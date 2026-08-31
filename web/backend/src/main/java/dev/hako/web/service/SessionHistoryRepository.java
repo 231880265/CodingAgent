@@ -9,6 +9,7 @@ import dev.hako.web.domain.RunState;
 import dev.hako.web.domain.SessionState;
 import jakarta.annotation.PostConstruct;
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -51,6 +52,7 @@ public class SessionHistoryRepository {
                     resource_json TEXT NOT NULL,
                     conversation_user TEXT,
                     summary_json TEXT,
+                    run_memory_json TEXT,
                     UNIQUE(session_id, ordinal)
                 )
                 """);
@@ -75,6 +77,7 @@ public class SessionHistoryRepository {
                 )
                 """);
         ensureColumn("runs", "conversation_user", "TEXT");
+        ensureColumn("runs", "run_memory_json", "TEXT");
         // 旧版把“新建会话”实现成 CLOSED。新语义下这些本地历史应当可继续，
         // 只迁移一次；此后显式 close 产生的 CLOSED 仍保持终态。
         int legacyCloseMigration = jdbc.update(
@@ -126,14 +129,16 @@ public class SessionHistoryRepository {
         jdbc.update("""
                 INSERT INTO runs(
                     run_id, session_id, ordinal, status, prompt, created_at,
-                    finished_at, resource_json, conversation_user, summary_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    finished_at, resource_json, conversation_user, summary_json,
+                    run_memory_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(run_id) DO UPDATE SET
                     status=excluded.status,
                     finished_at=excluded.finished_at,
                     resource_json=excluded.resource_json,
                     conversation_user=excluded.conversation_user,
-                    summary_json=excluded.summary_json
+                    summary_json=excluded.summary_json,
+                    run_memory_json=excluded.run_memory_json
                 """,
                 run.runId.toString(),
                 session.sessionId.toString(),
@@ -144,7 +149,8 @@ public class SessionHistoryRepository {
                 text(run.finishedAt),
                 run.resource(mapper).toString(),
                 run.conversationUserMessage(),
-                run.summary == null ? null : run.summary.toString());
+                run.summary == null ? null : run.summary.toString(),
+                run.runMemory == null ? null : run.runMemory.toString());
     }
 
     public void saveEvent(BufferedEvent event) {
@@ -212,7 +218,7 @@ public class SessionHistoryRepository {
 
         ArrayNode runs = root.putArray("runs");
         jdbc.query(
-                "SELECT resource_json, summary_json FROM runs WHERE session_id=? ORDER BY ordinal",
+                "SELECT resource_json, summary_json, run_memory_json FROM runs WHERE session_id=? ORDER BY ordinal",
                 result -> {
                     ObjectNode run = parseObject(result.getString("resource_json"));
                     String summary = result.getString("summary_json");
@@ -220,6 +226,12 @@ public class SessionHistoryRepository {
                         run.putNull("summary");
                     } else {
                         run.set("summary", parseObject(summary));
+                    }
+                    String runMemory = result.getString("run_memory_json");
+                    if (runMemory == null) {
+                        run.putNull("runMemory");
+                    } else {
+                        run.set("runMemory", parseObject(runMemory));
                     }
                     runs.add(run);
                 },
@@ -252,7 +264,11 @@ public class SessionHistoryRepository {
         jdbc.query(
                 """
                 SELECT prompt, conversation_user, resource_json, summary_json
-                FROM runs WHERE session_id=? ORDER BY ordinal
+                FROM (
+                    SELECT prompt, conversation_user, resource_json, summary_json, ordinal
+                    FROM runs WHERE session_id=? AND summary_json IS NOT NULL
+                    ORDER BY ordinal DESC LIMIT 3
+                ) ORDER BY ordinal
                 """,
                 result -> {
                     String summaryRaw = result.getString("summary_json");
@@ -268,8 +284,8 @@ public class SessionHistoryRepository {
                     if (user == null || user.isBlank()) {
                         user = result.getString("prompt");
                     }
-                    conversation.addObject().put("role", "user").put("content", user);
-                    conversation.addObject().put("role", "assistant").put("content", finalText);
+                    conversation.addObject().put("role", "user").put("content", clipText(user, 3_000));
+                    conversation.addObject().put("role", "assistant").put("content", clipText(finalText, 3_000));
                 },
                 sessionId.toString());
         Long maxEventId = jdbc.queryForObject(
@@ -282,7 +298,37 @@ public class SessionHistoryRepository {
                 ? runs.path(runs.size() - 1)
                 : mapper.createObjectNode();
         root.put("lastMaxSteps", last.path("options").path("maxSteps").asInt(100));
+        root.set("memorySnapshot", getMemorySnapshot(sessionId));
         return root;
+    }
+
+    public ArrayNode getMemorySnapshot(UUID sessionId) {
+        ArrayNode memories = mapper.createArrayNode();
+        jdbc.query(
+                """
+                SELECT run_memory_json FROM (
+                    SELECT ordinal, run_memory_json FROM runs
+                    WHERE session_id=? AND run_memory_json IS NOT NULL
+                    ORDER BY ordinal DESC LIMIT 50
+                ) ORDER BY ordinal
+                """,
+                result -> {
+                    memories.add(parseObject(result.getString("run_memory_json")));
+                },
+                sessionId.toString());
+        return memories;
+    }
+
+    public List<ObjectNode> getRunEvents(UUID sessionId, UUID runId) {
+        List<ObjectNode> events = new java.util.ArrayList<>();
+        jdbc.query(
+                "SELECT envelope_json FROM events WHERE session_id=? AND run_id=? ORDER BY event_id",
+                result -> {
+                    events.add(parseObject(result.getString("envelope_json")));
+                },
+                sessionId.toString(),
+                runId.toString());
+        return events;
     }
 
     public ObjectNode getRunSummary(UUID sessionId, UUID runId) {
@@ -333,5 +379,12 @@ public class SessionHistoryRepository {
         } else {
             node.put(field, value);
         }
+    }
+
+    private static String clipText(String value, int limit) {
+        if (value == null || value.length() <= limit) {
+            return value;
+        }
+        return value.substring(0, limit - 24) + "\n[history truncated]";
     }
 }

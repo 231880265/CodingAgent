@@ -18,6 +18,7 @@ from hako.loop import Agent  # noqa: E402
 from hako.subagent import make_delegate_readonly  # noqa: E402
 from hako.tools import build_default_registry  # noqa: E402
 from web.worker.approval import ApprovalCoordinator, ApprovalInput  # noqa: E402
+from web.worker.history_tool import MemoryIndex, make_search_session_history  # noqa: E402
 from web.worker.protocol import (  # noqa: E402
     ProtocolError,
     ProtocolWriter,
@@ -34,12 +35,13 @@ def build_web_agent(
     bus: EventBus,
     approve: ApprovalCoordinator,
     cancelled: Callable[[], bool],
+    memory_index: MemoryIndex,
 ) -> Agent:
     config = Config.from_env(workspace=workspace)
     config.max_steps = max_steps
-    extra_tools = (
-        [make_delegate_readonly(config, bus)] if config.enable_subagent else []
-    )
+    extra_tools = [make_search_session_history(memory_index, config.tool_result_budget)]
+    if config.enable_subagent:
+        extra_tools.append(make_delegate_readonly(config, bus))
     registry = build_default_registry(
         config.workspace,
         config.tool_result_budget,
@@ -102,9 +104,18 @@ def _semantic_history(payload: dict) -> list[dict[str, str]]:
     return messages
 
 
+def _memory_snapshot(payload: dict) -> list[dict]:
+    raw = payload.get("memorySnapshot", [])
+    if not isinstance(raw, list) or len(raw) > 100:
+        raise ProtocolError("memorySnapshot must be an array with at most 100 runs")
+    if any(not isinstance(item, dict) or not isinstance(item.get("runId"), str) for item in raw):
+        raise ProtocolError("memorySnapshot contains an invalid RunMemory")
+    return raw
+
+
 def _start_payload(
     message: dict,
-) -> tuple[str, str, Path, str, int, str, list[dict[str, str]]]:
+) -> tuple[str, str, Path, str, int, str, list[dict[str, str]], list[dict]]:
     if message.get("type") != "start":
         raise ProtocolError("Worker 第一条输入必须是 start。")
     payload = message.get("payload")
@@ -139,10 +150,11 @@ def _start_payload(
         max_steps,
         _attachment_context(payload),
         _semantic_history(payload),
+        _memory_snapshot(payload),
     )
 
 
-def _run_payload(message: dict, session_id: str) -> tuple[str, str, int, str]:
+def _run_payload(message: dict, session_id: str) -> tuple[str, str, int, str, list[dict]]:
     if message.get("type") != "run":
         raise ProtocolError("后续输入必须是 run。")
     payload = message.get("payload")
@@ -159,7 +171,13 @@ def _run_payload(message: dict, session_id: str) -> tuple[str, str, int, str]:
         raise ProtocolError("run.prompt 必须是非空字符串。")
     if not isinstance(max_steps, int) or isinstance(max_steps, bool) or not 1 <= max_steps <= 100:
         raise ProtocolError("run.maxSteps 必须在 1 到 100 之间。")
-    return run_id, prompt.strip(), max_steps, _attachment_context(payload)
+    return (
+        run_id,
+        prompt.strip(),
+        max_steps,
+        _attachment_context(payload),
+        _memory_snapshot(payload),
+    )
 
 
 def run() -> int:
@@ -179,6 +197,7 @@ def run() -> int:
             max_steps,
             attachments,
             semantic_history,
+            memory_snapshot,
         ) = _start_payload(start)
 
         incoming = ApprovalInput(sys.stdin, session_id=session_id)
@@ -193,15 +212,20 @@ def run() -> int:
             writer=writer,
             incoming=incoming,
         )
+        memory_index = MemoryIndex(memory_snapshot)
         agent = build_web_agent(
             workspace=workspace,
             max_steps=max_steps,
             bus=bus,
             approve=approve,
             cancelled=incoming.is_cancelled,
+            memory_index=memory_index,
         )
         try:
-            agent.conversation.restore_semantic(semantic_history)
+            agent.conversation.restore_semantic(
+                semantic_history,
+                memory_context=memory_index.session_context(),
+            )
         except ValueError as exc:
             raise ProtocolError(str(exc)) from exc
         while True:
@@ -211,7 +235,13 @@ def run() -> int:
             result = agent.run(prompt, attachment_context=attachments)
             writer.run_message("result", session_id, run_id, result_payload(result))
             follow_up = incoming.next_goal()
-            run_id, prompt, max_steps, attachments = _run_payload(follow_up, session_id)
+            run_id, prompt, max_steps, attachments, memory_snapshot = _run_payload(
+                follow_up, session_id
+            )
+            memory_index.update(memory_snapshot)
+            agent.conversation.compact_for_follow_up(
+                memory_context=memory_index.session_context()
+            )
     except ProtocolError as exc:
         if session_id and run_id:
             writer.run_message(

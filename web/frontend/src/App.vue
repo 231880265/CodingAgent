@@ -144,8 +144,8 @@ onMounted(() => void initialize());
         >
           <div v-if="!session" class="launcher-view">
             <div class="launcher-copy">
-              <h1>开始一个 Coding Task</h1>
-              <p>选择工作区，然后描述任务。</p>
+              <h1>开始一个任务</h1>
+              <p>直接提问，或选择工作区处理代码。</p>
             </div>
             <TaskComposer
               :active="isActive"

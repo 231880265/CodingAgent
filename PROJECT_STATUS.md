@@ -21,6 +21,8 @@
 | 2026-08-30 | 历史恢复 | SUSPENDED 会话以同 sessionId、新 workerId 恢复语义 Conversation；旧工具观察不恢复 |
 | 2026-08-30 | Web 信息架构 | 普通对话、仓库分析、Verified Change 分别呈现；连续读取与修改分组，细节按需展开 |
 | 2026-08-30 | PromoOps 收束 | 演示只保留 Run1 线上发布 Bug 与 Run2 Priority/Conflict 产品迭代 |
+| 2026-08-31 | 三层会话记忆 | RunMemory 硬事实由事件确定性生成；最近三轮自动携带，旧事实由 `search_session_history` 按需检索 |
+| 2026-08-31 | 问答入口收束 | 知识问答无需手动选择工作区；空值由后端解析为首个受控默认目录，初始等待文案不再虚构文件调查 |
 
 ## 当前核心机制
 
@@ -35,8 +37,9 @@
 
 - 作者文件修改后，同路径旧 `read_file` 结果立即失效，避免模型继续依据旧版本构造编辑。
 - 长文件按行分页，长命令输出保留头尾并提供恢复提示。
-- 历史恢复只重建完整的 user/assistant 语义对，不恢复旧 tool call、读取内容或 stdout/stderr。
-- 当前真实主线没有接近上下文容量，也没有出现 context-length 错误，因此暂不实现通用 compaction。
+- 每个 Run 结束后，从持久化事件确定性生成修改文件、验证命令/退出码、审批和失败；模型最终说明只作为非权威语义摘要。
+- Run 边界只保留最近三组 user/assistant 语义对和有界 Session 事实，不恢复旧 tool call、读取内容或 stdout/stderr；更早事实由只读 `search_session_history` 检索。
+- 当前没有实现运行中按 token 阈值自动摘要的通用 compaction；当前 Workspace 始终高于历史记忆，引用旧代码后必须重新读取。
 
 ### 执行、安全和完成
 
@@ -64,13 +67,13 @@ Run2 在 Run1 修改后的同一 Workspace、同一 Session 中继续。需求�
 
 ## 当前统一测试口径
 
-2026-08-30 当前工作树最近一次完整复测：
+2026-08-31 当前工作树最近一次完整复测：
 
 | 范围 | 结果 |
 |---|---|
-| Python Agent 核心 | `203 passed, 1 skipped` |
-| Spring Boot 控制面 | `18 passed` |
-| Vue/Vitest | `34 passed` |
+| Python Agent 核心 | `208 passed, 1 skipped` |
+| Spring Boot 控制面 | `20 passed` |
+| Vue/Vitest | `35 passed` |
 | 前端生产构建 | TypeScript 检查通过，`324 modules transformed` |
 | PromoOps Run1 初态 | `1 failed, 26 passed` |
 | PromoOps Run1 修复 / Run2 起点 | `27 passed` |
@@ -85,7 +88,7 @@ Run2 在 Run1 修改后的同一 Workspace、同一 Session 中继续。需求�
 - Verified Finish 只证明最后一次作者修改后某项验证成功，不证明覆盖充分或代码无隐藏缺陷。
 - shell 快照与危险命令门禁不是操作系统沙箱；工作区外副作用和命令内已抵消的瞬时变化不可见。
 - 工具保持串行；当前主线没有测出值得增加事件乱序和异常聚合复杂度的墙钟收益。
-- 没有通用 compaction；达到上下文阈值或真实任务被历史阻断时再实现。
+- 只有 Run 边界确定性裁剪，没有运行中自动摘要 compaction；达到上下文阈值或真实任务被阻断时再实现。
 - 可选只读 subagent 的权限隔离有确定性测试，但没有稳定的自然采用和收益数据，不列为核心卖点。
 - 历史恢复是语义重建，不是旧 Python 进程、模型隐藏状态或工具快照的精确续传。
 - Web 适合本机单用户，没有登录、TLS、远程执行、多租户或系统级沙箱。

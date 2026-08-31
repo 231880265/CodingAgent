@@ -42,6 +42,8 @@ _EVENT_FIELDS: dict[str, tuple[str, ...]] = {
         "derived_paths",
         "verification_kind",
         "verification_command",
+        "command_status",
+        "exit_code",
     ),
     "context_stats": ("used_tokens", "limit", "message_count"),
     "verification_required": ("changed_paths", "message"),

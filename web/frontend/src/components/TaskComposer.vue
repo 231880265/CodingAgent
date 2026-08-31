@@ -36,7 +36,7 @@ let previousRunId = "";
 
 const sendDisabled = computed(() => {
   if (props.active || props.busy || props.disabled || !form.prompt.trim()) return true;
-  if (!props.session) return !form.workspace.trim();
+  if (!props.session) return false;
   return !props.session.canContinue;
 });
 const cancelPending = computed(
@@ -128,11 +128,7 @@ function submit(): void {
   }
 
   const workspace = form.workspace.trim();
-  if (!workspace) {
-    validationMessage.value = "请先设置 Agent 实际操作的本机工作区。";
-    return;
-  }
-  if (!/^(?:[A-Za-z]:[\\/]|\/)/.test(workspace)) {
+  if (workspace && !/^(?:[A-Za-z]:[\\/]|\/)/.test(workspace)) {
     validationMessage.value = "工作区必须使用绝对路径。";
     return;
   }
@@ -174,15 +170,15 @@ function requestBytes(prompt: string, values: AttachmentInput[]): number {
     <div class="composer-box" :data-disabled="active || disabled">
       <div v-if="!session" class="composer-workspace-row">
         <span class="folder-mark" aria-hidden="true"></span>
-        <label class="visually-hidden" for="workspace-path">工作区绝对路径</label>
+        <label class="visually-hidden" for="workspace-path">工作区绝对路径（可选）</label>
         <input
           v-model="form.workspace"
           id="workspace-path"
           name="workspace"
           type="text"
           autocomplete="off"
-          placeholder="D:\\path\\to\\repository"
-          aria-label="工作区绝对路径"
+          placeholder="工作区（可选，不填写则使用默认目录）"
+          aria-label="工作区绝对路径（可选）"
         />
       </div>
       <div v-if="attachments.length" class="attachment-list" aria-label="本轮附件">

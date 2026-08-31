@@ -323,6 +323,8 @@ def _run_goal(
             "derivedPaths": [],
             "verificationKind": "test",
             "verificationCommand": "python -m pytest -q",
+            "commandStatus": "succeeded",
+            "exitCode": 0,
         },
     )
     total_tokens = 7210 + (run_number - 1) * 2400

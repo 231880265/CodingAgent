@@ -45,6 +45,10 @@ class ToolResult:
     # 主循环只消费这份结构化元数据，不靠 TUI 摘要或模型自述判断是否验证成功。
     verification_kind: str = ""
     verification_command: str = ""
+    # run_command 的机器可读结果。RunMemory 只消费这些字段，不从 detail/summary
+    # 中用正则猜 exit=0，避免展示文本变化后破坏证据链。
+    command_status: str = ""
+    exit_code: int | None = None
     # 工具内部若调用了模型（例如只读 subagent），把真实 usage 交回主循环。
     # 否则总 token 只统计主模型，会让 A/B 成本比较失真。
     prompt_tokens: int = 0

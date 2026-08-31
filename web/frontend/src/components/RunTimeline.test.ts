@@ -319,7 +319,7 @@ describe("RunTimeline transcript hierarchy", () => {
     const host = mountTimeline(events, true);
 
     expect(host.querySelector(".assistant-pending")?.textContent)
-      .toContain("正在理解任务并选择首批相关文件");
+      .toContain("正在思考您的问题…");
     expect(host.querySelector(".progress-dots")).not.toBeNull();
     expect(host.querySelector(".runtime-details summary")?.textContent)
       .toContain("模型决策 41 次");

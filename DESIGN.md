@@ -66,6 +66,7 @@ Agent 主循环 ---- messages + tool schemas ----> LLM
 | #11 | 评测采用可重置模板、隐藏测试和外部复核 | 本地 `promoops-demo/`（主仓库外） |
 | #12 | subagent 只负责隔离的只读调查 | `hako/subagent.py` |
 | #13 | Web 将连续对话建模为 Session，将单条目标建模为 Run | `web/backend/.../SessionService.java`、`web/worker/main.py`、`web/frontend/.../useSessionController.ts` |
+| #14 | 三层记忆：短期 Conversation、事件 RunMemory、当前 Workspace | `hako/history.py`、`web/worker/history_tool.py`、`web/backend/.../RunMemoryBuilder.java` |
 
 ## #1 事件总线：内核不渲染
 
@@ -300,23 +301,37 @@ PromoOps 彩排曾暴露解释器错位：直接执行 PATH 中的 `pytest` 无�
 
 **问题。** 早期 Web 把一次 prompt、一个 Worker 和一条时间线都叫 task。这样能跑单次演示，却无法自然表达“先定位 → 再修复 → 最后补测试”；如果每次追问都新建 Agent，模型会丢掉前文。如果取消一次运行就杀 Worker，用户也不能继续纠正方向。另一方面，直接把所有操作永久塞进一个全局 Agent，又会让不同仓库任务互相污染。
 
-**决策。** 显式区分四个对象：Workspace 是工具操作目录；Session 是一次连续工程对话；Run 是用户在 Session 中发送的一条目标；Attachment 是某个 Run 增加的 user context。普通取消只结束 Run 并保活当前 Worker；切换或新建会话时，当前 Session 进入 `SUSPENDED`，Worker 退出但 Session 身份和可展示历史保留。再次发送后续目标时，后端以同一个 sessionId、新 workerId 启动 Worker，只把已完成 Run 的“用户输入 + 最终回答”恢复为语义 Conversation，然后创建新 Run。旧 tool call、文件读取、stdout/stderr 不恢复，因为它们描述的是过去的工作区状态；新 Agent 必须重新读取当前仓库。Session 与 Run 使用两套状态机；事件必须携带 sessionId，Run 事件再携带 runId；后端与前端双重丢弃迟到身份。
+**决策。** 显式区分四个对象：Workspace 是工具操作目录；Session 是一次连续工程对话；Run 是用户在 Session 中发送的一条目标；Attachment 是某个 Run 增加的 user context。普通取消只结束 Run 并保活当前 Worker；切换或新建会话时，当前 Session 进入 `SUSPENDED`，Worker 退出但 Session 身份和可展示历史保留。再次发送后续目标时，后端以同一个 sessionId、新 workerId 启动 Worker，恢复最近三组“用户输入 + 最终回答”和有界 RunMemory，再创建新 Run。旧 tool call、文件读取、stdout/stderr 不恢复，因为它们描述的是过去的工作区状态；新 Agent 必须重新读取当前仓库。Session 与 Run 使用两套状态机；事件必须携带 sessionId，Run 事件再携带 runId；后端与前端双重丢弃迟到身份。
 
 **被否决方案。** 一是“一 prompt 一 Worker”，实现简单但没有真正多轮上下文；二是把 Cancel 等同于关闭 Session，用户无法在取消跑偏后继续追问；三是让输入框 `+` 同时承担附件和新会话，两个完全不同的生命周期会混淆；四是完整重放事件或 Python 对象，旧工具观察会污染当前仓库状态，LLM SDK、进程和精确 token 计数也无法可靠序列化；五是所有历史 Worker 永久驻留，少量会话虽可承受，但把产品正确性绑定到进程不退出，重启后仍会失忆；六是多 Session 并发，当前单用户本地答辩不需要，却会扩大进程、审批和 Workspace 冲突面。
 
-**代价。** 后端必须维护两套状态机、Run/Session 级事件身份、挂起/恢复协议和事件游标；取消命令时只能杀本次进程树，不能误杀仍需保活的 Worker。语义重建保留工程意图和结论，但不声称恢复原进程、旧工具观察、精确 token 统计或模型隐藏状态；恢复后的第一次调查可能重复读文件。SQLite 现在会保存 prompt、附件文本、最终回答与工具事件，因此它是本地敏感数据，必须留在被忽略目录。当前上限为 200 条语义消息，符合本地少量会话定位，不是无限历史方案。
+**代价。** 后端必须维护两套状态机、Run/Session 级事件身份、挂起/恢复协议和事件游标；取消命令时只能杀本次进程树，不能误杀仍需保活的 Worker。语义重建保留工程意图和结论，但不声称恢复原进程、旧工具观察、精确 token 统计或模型隐藏状态；恢复后的第一次调查可能重复读文件。SQLite 会保存 prompt、附件文本、最终回答、工具事件与 RunMemory，因此它是本地敏感数据，必须留在被忽略目录。
 
-**验证。** Spring 子进程集成测试同时覆盖两条路径：同一 OPEN Session 的第二 Run 复用 workerId；SUSPENDED Session 恢复后 sessionId 不变、workerId 改变、runCount 递增，Fake Worker 仍能引用上一轮语义上下文。Python 测试确认只接受完整的 user/assistant 交替消息，拒绝悬空或乱序历史，并确认恢复内容不含 tool 消息。等待审批时取消后 Session 仍可继续；旧 Worker 退出后历史事件仍可查看。前端测试确认左侧列表不暴露 OPEN/CLOSED 等内部枚举，历史会话可直接进入继续输入。
+**验证。** Spring 子进程集成测试同时覆盖两条路径：同一 OPEN Session 的第二 Run 复用 workerId；SUSPENDED Session 恢复后 sessionId 不变、workerId 改变、runCount 递增，Fake Worker 仍能引用上一轮语义上下文。Python 测试确认恢复内容不含 tool 消息，Run 边界只保留最近语义对，而且内核的验证提醒不会被误记为用户 Goal。等待审批时取消后 Session 仍可继续；旧 Worker 退出后历史事件仍可查看。
 
 **踩坑。** 最初把输入框 `+` 误解成新会话入口，后来拆成附件与侧栏“新会话”。第二个坑是把历史事件重画出来误当作 Conversation 恢复；事件适合审计，只有成对的用户语义和最终回答适合重建模型上下文。第三个坑是 Windows 中只 kill PowerShell 父进程会让 Python/Java 子进程继续持有 stdout，界面虽显示取消但命令仍跑；修法是独立进程组 `CTRL_BREAK`，再以 `taskkill /T /F` 兜底。
 
 **答辩一句话。** Run 是一句新目标，Session 才是一段连续工程记忆；挂起只回收 Worker，恢复时重建语义 Conversation，但仓库事实必须重新读取，不能把旧工具日志冒充当前状态。
 
+## #14 三层记忆：硬事实来自事件，旧细节按需检索
+
+**问题。** 把所有旧工具调用永久塞回 Conversation 会让 token 随 Run 数增长，还会把旧源码和旧 stdout 当成当前事实；只让模型写一段摘要又可能把失败说成成功、遗漏退出码和修改范围。用户追问“之前为什么失败”时，完全丢弃旧记录也不合理。
+
+**决策。** 当前 Conversation 只保留最近三组真实 user/assistant 语义对。每个 Run 结束时，Spring Boot 从已持久化事件确定性生成 `RunMemory`：用户目标、创建/修改/删除路径、验证命令与退出码、审批决定、工具失败和证据事件 ID 都是硬事实；模型最终回答只存入 `semanticSummary`，并明确标记 `authoritative=false`。后端把同一 Session 最近 50 个 RunMemory 的有界快照交给专属 Worker；模型仅在追问旧工作时调用只读 `search_session_history`。事实优先级固定为：当前 Workspace > 事件硬事实 > 模型语义摘要。
+
+**被否决方案。** 一是完整重放历史，容量和过期状态不可控；二是只依赖 LLM 摘要，无法证明退出码和修改文件；三是立刻引入 embedding/向量数据库，会增加模型、索引和一致性问题。当前少量本地会话使用关键词、中文二元组和失败事实加权已经足够。
+
+**代价。** 关键词检索不是语义检索，换一种完全不同的说法可能漏召回；旧版本数据库中尚未生成 RunMemory 的 Run 只能由 UI 查看原事件。返回的历史代码仍可能过期，因此工具结果会强制提醒重新读取 Workspace。
+
+**验证。** Python 测试覆盖检索范围、Run 过滤、八条上限、失败记录优先、上下文裁剪和内核提醒隔离；Java 测试证明即使模型文字声称成功，事件里的非零退出码仍保留为权威失败事实。子进程集成测试确认 RunMemory 持久化后可用于后续 Run。
+
+**答辩一句话。** 短期记忆保连贯，事件记忆保事实，Workspace 保当前状态；模型可以解释历史，但不能改写历史。
+
 ## 证据边界：已验证、推断与尚未证明
 
 ### 已验证事实
 
-- 当前本地核心回归：Python `203 passed, 1 skipped`，Spring Boot `18 passed`，前端 `34 passed`；生产构建转换 `324` 个模块。本次未提交改动尚未获得远端 CI 结论。
+- 当前本地核心回归：Python `208 passed, 1 skipped`，Spring Boot `19 passed`，前端 `34 passed`；生产构建转换 `324` 个模块。本次未提交改动尚未获得远端 CI 结论。
 - 真实 V4-Flash 最小闭环已完成 `list/read/edit/pytest/DONE_VERIFIED`；单例只能证明链路可工作。
 - PromoOps Run1 有稳定失败基线、修复后公开测试和外部 held-out 复核；Run2 有产品迭代后的公开测试和外部 held-out 复核。
 - Windows bare pytest 会统一到当前解释器；截断续跑、Verified Finish 和错误终止由确定性测试覆盖。
@@ -335,11 +350,11 @@ PromoOps 彩排曾暴露解释器错位：直接执行 PATH 中的 `pytest` 无�
 - shell 文件快照不是进程/网络/容器沙箱，看不到工作区外和同一命令内已抵消的瞬时副作用。
 - 正常 `finish_reason=stop` 但任务语义实际需要修改时，内核没有通用意图分类器；当前只对可观测的截断误结束做强约束。
 - 当前没有统计意义上的任务成功率、模型排名或 subagent 消融收益。
-- 没有实现通用 compaction、只读工具并发或可写多 Agent；重新评估条件见下表。
+- 没有实现运行中自动摘要 compaction、只读工具并发或可写多 Agent；重新评估条件见下表。
 
 | 未实现项 | 当前不实现的证据 | 重新评估条件 |
 |---|---|---|
-| 通用 compaction | 当前连续任务无 context-length 错误，也未达到 70% 门槛 | 达到窗口 70%，或真实任务被历史膨胀阻断 |
+| 运行中自动摘要 compaction | 已有 Run 边界裁剪；当前任务内无 context-length 错误，也未达到 70% 门槛 | 单个长 Run 达到窗口 70%，或真实任务被上下文阻断 |
 | 只读工具并发 | 当前观察中本地读取不是用户可感知瓶颈 | 可并发读取占比 >=10%，且理论可省 >=1s |
 | 可写 subagent | 单写入者更易归因和验证；只读采用尚未证明 | 出现可独立分区、冲突可检测且有重复样本收益的任务 |
 | 完整 OS 沙箱 | 当前实现是权限门禁和工作区观测，不具备系统隔离能力 | 进入不可信仓库产品化部署时接入容器/受限进程边界 |

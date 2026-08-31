@@ -15,7 +15,7 @@ public final class ApiModels {
     private ApiModels() {}
 
     public record CreateSessionRequest(
-            @NotBlank @Size(max = 4096) String workspace,
+            @Size(max = 4096) String workspace,
             @NotBlank @Size(max = 20000) String prompt,
             @Valid @Size(max = 5) List<@Valid AttachmentInput> attachments,
             @Valid RunOptions options) {}

@@ -39,6 +39,7 @@ public final class SessionState {
     public final int priorRunCount;
     public final long firstEventId;
     public final JsonNode restoredConversation;
+    public final JsonNode restoredMemory;
     public final Map<UUID, RunState> runs = new LinkedHashMap<>();
     public final Deque<BufferedEvent> events = new ArrayDeque<>();
     public final List<SseEmitter> subscribers = new ArrayList<>();
@@ -66,6 +67,7 @@ public final class SessionState {
                 0,
                 1,
                 null,
+                null,
                 prompt,
                 maxSteps,
                 attachments);
@@ -78,6 +80,7 @@ public final class SessionState {
             int priorRunCount,
             long nextEventId,
             JsonNode restoredConversation,
+            JsonNode restoredMemory,
             String prompt,
             int maxSteps,
             List<AttachmentInput> attachments) {
@@ -91,6 +94,9 @@ public final class SessionState {
         this.restoredConversation = restoredConversation == null
                 ? null
                 : restoredConversation.deepCopy();
+        this.restoredMemory = restoredMemory == null
+                ? null
+                : restoredMemory.deepCopy();
         createRun(prompt, maxSteps, attachments);
     }
 

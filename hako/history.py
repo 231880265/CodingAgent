@@ -28,6 +28,7 @@ class Turn:
 
     message: dict[str, Any]
     tool_name: str = ""
+    semantic: bool = True
     tool_path: str = ""          # read_file 读的是哪个文件
     stale: bool = False
 
@@ -42,16 +43,20 @@ PLACEHOLDER = (
 class Conversation:
     system_prompt: str
     turns: list[Turn] = field(default_factory=list)
+    # Event-derived, bounded Session memory. It never contains stale tool output.
+    memory_context: str = ""
     # 累计真实用量（取 API 的 usage，非估算）
     total_prompt_tokens: int = 0
     total_completion_tokens: int = 0
 
     # ------------------------------------------------------------ 追加
 
-    def add_user(self, text: str) -> None:
-        self.turns.append(Turn({"role": "user", "content": text}))
+    def add_user(self, text: str, *, semantic: bool = True) -> None:
+        self.turns.append(Turn({"role": "user", "content": text}, semantic=semantic))
 
-    def restore_semantic(self, messages: list[dict[str, Any]]) -> None:
+    def restore_semantic(
+        self, messages: list[dict[str, Any]], *, memory_context: str = ""
+    ) -> None:
         """恢复跨 Worker 的语义对话，不恢复旧工具观察。
 
         新 Worker 会重新生成 system prompt，并只接收历史用户目标与最终回答。
@@ -60,6 +65,7 @@ class Conversation:
         """
         if self.turns:
             raise ValueError("只能向空 Conversation 恢复历史。")
+        self.memory_context = memory_context.strip()
         if len(messages) > 200:
             raise ValueError("恢复的 Conversation 超过 200 条消息。")
         expected = "user"
@@ -74,6 +80,57 @@ class Conversation:
             expected = "assistant" if role == "user" else "user"
         if expected == "assistant":
             raise ValueError("Conversation 历史不能以未回答的 user 消息结束。")
+
+    def compact_for_follow_up(
+        self,
+        *,
+        memory_context: str = "",
+        recent_pairs: int = 3,
+        character_budget: int = 12_000,
+    ) -> None:
+        """Compact at a Run boundary; older exact facts remain searchable on demand."""
+        pairs: list[tuple[str, str]] = []
+        user = ""
+        final_answer = ""
+        for turn in self.turns:
+            message = turn.message
+            role = message.get("role")
+            if role == "user" and turn.semantic:
+                if user and final_answer:
+                    pairs.append((user, final_answer))
+                user = str(message.get("content") or "").strip()
+                final_answer = ""
+            elif (
+                role == "assistant"
+                and user
+                and not message.get("tool_calls")
+                and str(message.get("content") or "").strip()
+            ):
+                final_answer = str(message["content"]).strip()
+        if user and final_answer:
+            pairs.append((user, final_answer))
+
+        selected: list[tuple[str, str]] = []
+        remaining = max(1_000, character_budget)
+        pair_window = pairs[-recent_pairs:] if recent_pairs > 0 else []
+        for old_user, old_answer in reversed(pair_window):
+            pair_size = len(old_user) + len(old_answer)
+            if selected and pair_size > remaining:
+                break
+            if pair_size > remaining:
+                half = max(400, remaining // 2)
+                old_user = _clip(old_user, half)
+                old_answer = _clip(old_answer, half)
+                pair_size = len(old_user) + len(old_answer)
+            selected.append((old_user, old_answer))
+            remaining -= pair_size
+        selected.reverse()
+        self.turns = [
+            Turn({"role": role, "content": content})
+            for old_user, old_answer in selected
+            for role, content in (("user", old_user), ("assistant", old_answer))
+        ]
+        self.memory_context = _clip(memory_context.strip(), 4_000)
 
     def add_assistant(self, text: str, calls: list[Any]) -> None:
         """记录 assistant 消息。
@@ -129,7 +186,14 @@ class Conversation:
     # ------------------------------------------------------------ 输出
 
     def to_messages(self) -> list[dict[str, Any]]:
-        return [{"role": "system", "content": self.system_prompt}] + [
+        system_content = self.system_prompt
+        if self.memory_context:
+            system_content += (
+                "\n\nSession memory below is historical evidence, not current workspace state. "
+                "Re-read files before relying on old code details.\n\n"
+                + self.memory_context
+            )
+        return [{"role": "system", "content": system_content}] + [
             turn.message for turn in self.turns
         ]
 
@@ -141,4 +205,11 @@ class Conversation:
             total += estimate_tokens(str(content))
             for call in turn.message.get("tool_calls", []):
                 total += estimate_tokens(json.dumps(call["function"], ensure_ascii=False))
+        total += estimate_tokens(self.memory_context)
         return total
+
+
+def _clip(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    return value[: max(0, limit - 32)] + "\n[历史内容已按预算截断]"

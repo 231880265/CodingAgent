@@ -279,7 +279,7 @@ const activeProgress = computed<ActiveProgress | null>(() => {
   if (significant?.type === "tool_call_finished") {
     return progressAfterTool(events, significant);
   }
-  return { label: "正在理解任务并选择首批相关文件", animated: true };
+  return { label: "正在思考您的问题…", animated: true };
 });
 
 watch(
