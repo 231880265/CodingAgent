@@ -8,9 +8,31 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 class ProcessWorkerLauncherTest {
+    @Test
+    void passesGenericHakoModelConfigurationWithoutUnrelatedVariables() {
+        var child = new HashMap<String, String>();
+        child.put("SHOULD_BE_CLEARED", "old");
+
+        ProcessWorkerLauncher.copyAllowedEnvironment(
+                child,
+                Map.of(
+                        "HAKO_API_KEY", "generic-test-key",
+                        "HAKO_BASE_URL", "https://gateway.example/v1",
+                        "HAKO_MODEL", "gpt-5.2",
+                        "UNRELATED_SECRET", "must-not-pass"));
+
+        assertEquals("generic-test-key", child.get("HAKO_API_KEY"));
+        assertEquals("https://gateway.example/v1", child.get("HAKO_BASE_URL"));
+        assertEquals("gpt-5.2", child.get("HAKO_MODEL"));
+        assertNull(child.get("UNRELATED_SECRET"));
+        assertNull(child.get("SHOULD_BE_CLEARED"));
+    }
+
     @Test
     void readsUtf8LineAndStripsCrLf() throws Exception {
         var input = new ByteArrayInputStream("中文消息\r\n".getBytes(StandardCharsets.UTF_8));

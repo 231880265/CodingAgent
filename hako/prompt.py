@@ -50,11 +50,18 @@ def build_system_prompt(workspace: Path, tool_names: list[str]) -> str:
     环境信息必须给：不告诉它是 Windows，它会张口就来 `ls -la`。
     """
     shell = "PowerShell" if sys.platform == "win32" else "sh"
-    pytest_note = (
-        "- Windows 上直接调用 pytest 时，run_command 会自动使用启动 hako 的当前 Python 执行 `-m pytest`。\n"
-        if sys.platform == "win32"
-        else ""
-    )
+    if sys.platform == "win32" and (workspace / "test.ps1").is_file():
+        pytest_note = (
+            "- 当前仓库提供 `.\\test.ps1`：全量 pytest 优先使用该入口；"
+            "不要猜测 `.venv` 路径。该入口成功后，除非用户明确要求额外冒烟，"
+            "不要再临时拼接 `python -c` 重复验证。\n"
+        )
+    elif sys.platform == "win32":
+        pytest_note = (
+            "- Windows 上直接调用 pytest 时，run_command 会自动使用启动 hako 的当前 Python 执行 `-m pytest`。\n"
+        )
+    else:
+        pytest_note = ""
     delegation = ""
     if "delegate_readonly" in tool_names:
         delegation = """

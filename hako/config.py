@@ -9,7 +9,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-# 各家 OpenAI 兼容端点。填了哪个 KEY 就用哪家，省掉一个必填配置项。
+# 各家 OpenAI 兼容端点。旧的提供商专用 Key 仍然保留，避免已有配置失效；
+# 新接入统一优先使用 HAKO_API_KEY + HAKO_BASE_URL + HAKO_MODEL。
 PROVIDERS = {
     "SILICONFLOW_API_KEY": (
         "https://api.siliconflow.cn/v1",
@@ -67,21 +68,45 @@ class Config:
         root = Path(__file__).resolve().parent.parent
         load_dotenv(root / ".env")
 
-        api_key = base_url = model = ""
+        api_key = os.environ.get("HAKO_API_KEY", "").strip()
+        base_url = model = ""
         context_limit = 65536
-        for env_name, (url, default_model, limit) in PROVIDERS.items():
-            value = os.environ.get(env_name, "").strip()
-            if value:
-                api_key, base_url, model, context_limit = value, url, default_model, limit
-                break
+
+        if api_key:
+            base_url = os.environ.get("HAKO_BASE_URL", "").strip()
+            model = os.environ.get("HAKO_MODEL", "").strip()
+            missing = [
+                name
+                for name, value in (
+                    ("HAKO_BASE_URL", base_url),
+                    ("HAKO_MODEL", model),
+                )
+                if not value
+            ]
+            if missing:
+                raise SystemExit(
+                    "使用 HAKO_API_KEY 时还必须填写 " + "、".join(missing) + "。"
+                )
+        else:
+            for env_name, (url, default_model, limit) in PROVIDERS.items():
+                value = os.environ.get(env_name, "").strip()
+                if value:
+                    api_key, base_url, model, context_limit = (
+                        value,
+                        url,
+                        default_model,
+                        limit,
+                    )
+                    break
 
         if not api_key:
             names = " / ".join(PROVIDERS)
             raise SystemExit(
-                f"未找到 API key。请复制 .env.example 为 .env 并填入 {names} 之一。"
+                "未找到 API key。请复制 .env.example 为 .env 并填写 "
+                f"HAKO_API_KEY，或填入 {names} 之一。"
             )
 
-        # 显式覆盖优先于自动推断
+        # 旧提供商专用 Key 仍允许用 HAKO_* 显式覆盖自动推断结果。
         base_url = os.environ.get("HAKO_BASE_URL", "").strip() or base_url
         model = os.environ.get("HAKO_MODEL", "").strip() or model
 

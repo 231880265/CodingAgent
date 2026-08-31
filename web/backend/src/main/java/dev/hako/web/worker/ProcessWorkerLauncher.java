@@ -82,7 +82,7 @@ public class ProcessWorkerLauncher implements WorkerLauncher {
         return new ProcessWorkerSession(process, mapper, listener, ioExecutor);
     }
 
-    private static void copyAllowedEnvironment(
+    static void copyAllowedEnvironment(
             Map<String, String> child,
             Map<String, String> parent) {
         child.clear();

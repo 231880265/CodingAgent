@@ -23,6 +23,9 @@
 | 2026-08-30 | PromoOps 收束 | 演示只保留 Run1 线上发布 Bug 与 Run2 Priority/Conflict 产品迭代 |
 | 2026-08-31 | 三层会话记忆 | RunMemory 硬事实由事件确定性生成；最近三轮自动携带，旧事实由 `search_session_history` 按需检索 |
 | 2026-08-31 | 问答入口收束 | 知识问答无需手动选择工作区；空值由后端解析为首个受控默认目录，初始等待文案不再虚构文件调查 |
+| 2026-08-31 | Run1 验证入口修复 | 通用 pytest 优先走仓库 `test.ps1`；项目测试脚本可登记为验证证据，修复 `27 passed` 却 `DONE_UNVERIFIED` 的误判 |
+| 2026-08-31 | 模型配置统一 | 新增 `HAKO_API_KEY + HAKO_BASE_URL + HAKO_MODEL` 通用入口；旧提供商 Key 保持兼容，Web 继续展示 Worker 实际上报的模型名 |
+| 2026-08-31 | Run2 Python 环境修复 | Windows bare Python 使用仓库或 `test.ps1` 明确声明的项目解释器；全量测试通过后不再鼓励额外猜测 venv 的内联冒烟 |
 
 ## 当前核心机制
 
@@ -44,7 +47,7 @@
 ### 执行、安全和完成
 
 - 所有文件路径必须在 Workspace 内；普通副作用需审批，高风险 shell 命令必须逐次确认。
-- Windows bare pytest 使用启动 hako 的当前 Python；显式解释器保持原样。
+- Windows 仓库若提供 `test.ps1`，通用 pytest 请求优先走项目入口；bare Python 在可发现时绑定仓库声明的项目解释器，不再把 hako 自身 venv 误当业务环境。
 - shell 执行前后比较工作区快照，结构化报告创建、修改、删除和派生产物。
 - 最后一次作者文件修改后必须出现受认可、退出码为 0 的测试、构建或静态检查，才能 `DONE_VERIFIED`；后续修改会使旧证据过期。
 - Cancel 只停止后续执行并回收命令进程树，不回滚已落盘文件。
@@ -71,9 +74,9 @@ Run2 在 Run1 修改后的同一 Workspace、同一 Session 中继续。需求�
 
 | 范围 | 结果 |
 |---|---|
-| Python Agent 核心 | `208 passed, 1 skipped` |
-| Spring Boot 控制面 | `20 passed` |
-| Vue/Vitest | `35 passed` |
+| Python Agent 核心 | `222 passed, 1 skipped` |
+| Spring Boot 控制面 | `21 passed` |
+| Vue/Vitest | `36 passed` |
 | 前端生产构建 | TypeScript 检查通过，`324 modules transformed` |
 | PromoOps Run1 初态 | `1 failed, 26 passed` |
 | PromoOps Run1 修复 / Run2 起点 | `27 passed` |

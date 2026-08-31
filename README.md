@@ -116,13 +116,12 @@ python -m venv .venv
 Copy-Item .env.example .env
 ```
 
-在本地 `.env` 中任选一家模型服务填写 API Key。`.env`、`.hako/`、`.claude/`、`.codex/`、`tmp/`、视频和压缩包均已忽略，不应提交。以硅基流动为例：
+在本地 `.env` 中填写模型配置。推荐使用统一变量，切换 OpenAI 或提供 OpenAI-compatible 接口的 GPT/Claude 网关时只需替换这三项；原有硅基流动等提供商专用 Key 仍兼容。`.env`、`.hako/`、`.claude/`、`.codex/`、`tmp/`、视频和压缩包均已忽略，不应提交：
 
 ```dotenv
-SILICONFLOW_API_KEY=
-# 可选覆盖
-# HAKO_MODEL=deepseek-ai/DeepSeek-V4-Flash
-# HAKO_BASE_URL=https://api.siliconflow.cn/v1
+HAKO_API_KEY=
+HAKO_BASE_URL=https://your-openai-compatible-endpoint/v1
+HAKO_MODEL=your-model-id
 ```
 
 公开配置模板见 [.env.example](.env.example)。不要把真实密钥写进 README、源码、测试或提交历史。

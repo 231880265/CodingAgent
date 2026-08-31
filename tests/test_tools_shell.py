@@ -18,6 +18,7 @@ from hako.tools.shell import (
     classify_verification,
     is_dangerous,
     make_run_command,
+    normalize_windows_python,
     normalize_windows_pytest,
     shell_argv,
 )
@@ -63,6 +64,60 @@ def test_windows_bare_pytest_uses_current_interpreter():
     ) == "pytest -q"
 
 
+def test_windows_generic_pytest_prefers_project_test_entry(tmp_path: Path):
+    (tmp_path / "test.ps1").write_text("exit 0\n", encoding="utf-8")
+
+    assert normalize_windows_pytest(
+        "python -m pytest -q",
+        platform="win32",
+        executable="ignored",
+        workspace=tmp_path,
+    ) == "& '.\\test.ps1'"
+    assert normalize_windows_pytest(
+        "python -m pytest tests/test_api.py -v",
+        platform="win32",
+        executable="ignored",
+        workspace=tmp_path,
+    ) == "python -m pytest tests/test_api.py -v"
+
+
+def test_windows_bare_python_uses_environment_declared_by_project_test_entry(
+    tmp_path: Path,
+):
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    project_python = tmp_path / ".venv" / "Scripts" / "python.exe"
+    project_python.parent.mkdir(parents=True)
+    project_python.write_text("", encoding="utf-8")
+    (workspace / "test.ps1").write_text(
+        '$python = Join-Path $PSScriptRoot "..\\.venv\\Scripts\\python.exe"\n',
+        encoding="utf-8",
+    )
+
+    normalized = normalize_windows_python(
+        'python -c "import fastapi; print(fastapi.__name__)"',
+        platform="win32",
+        workspace=workspace,
+    )
+
+    assert normalized.startswith(f"& '{project_python.resolve()}' -c")
+    assert "import fastapi" in normalized
+
+
+def test_windows_bare_python_does_not_guess_parent_environment(tmp_path: Path):
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    project_python = tmp_path / ".venv" / "Scripts" / "python.exe"
+    project_python.parent.mkdir(parents=True)
+    project_python.write_text("", encoding="utf-8")
+
+    assert normalize_windows_python(
+        "python -c \"print('safe')\"",
+        platform="win32",
+        workspace=workspace,
+    ) == "python -c \"print('safe')\""
+
+
 def test_run_command_records_the_normalized_windows_pytest(
     monkeypatch, workspace: Path
 ):
@@ -100,6 +155,76 @@ def test_run_command_records_the_normalized_windows_pytest(
     assert result.verification_command.endswith("-m pytest -q")
     assert "current Python" in result.summary
     assert "bare pytest" in result.detail
+
+
+def test_run_command_uses_and_records_project_test_entry(monkeypatch, workspace: Path):
+    captured: dict[str, object] = {}
+    (workspace / "test.ps1").write_text("exit 0\n", encoding="utf-8")
+
+    class FakeProcess:
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            return "27 passed\n", ""
+
+        def poll(self):
+            return self.returncode
+
+    def fake_popen(argv, **kwargs):
+        captured["argv"] = argv
+        return FakeProcess()
+
+    monkeypatch.setattr(shell_module.sys, "platform", "win32")
+    monkeypatch.setattr(shell_module.subprocess, "Popen", fake_popen)
+    registry = Registry([make_run_command(workspace)])
+
+    result = run(registry, "python -m pytest -q")
+
+    assert result.ok
+    assert str(captured["argv"][-1]).endswith("& '.\\test.ps1'")
+    assert result.verification_kind == "test"
+    assert result.verification_command == "& '.\\test.ps1'"
+    assert "project test entry" in result.summary
+    assert "仓库测试入口" in result.detail
+
+
+def test_run_command_routes_bare_python_to_declared_project_environment(
+    monkeypatch, tmp_path: Path
+):
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    project_python = tmp_path / ".venv" / "Scripts" / "python.exe"
+    project_python.parent.mkdir(parents=True)
+    project_python.write_text("", encoding="utf-8")
+    (workspace / "test.ps1").write_text(
+        '$python = Join-Path $PSScriptRoot "..\\.venv\\Scripts\\python.exe"\n',
+        encoding="utf-8",
+    )
+    captured: dict[str, object] = {}
+
+    class FakeProcess:
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            return "FASTAPI_OK\n", ""
+
+        def poll(self):
+            return self.returncode
+
+    def fake_popen(argv, **kwargs):
+        captured["argv"] = argv
+        return FakeProcess()
+
+    monkeypatch.setattr(shell_module.sys, "platform", "win32")
+    monkeypatch.setattr(shell_module.subprocess, "Popen", fake_popen)
+    registry = Registry([make_run_command(workspace)])
+
+    result = run(registry, 'python -c "import fastapi; print(\'FASTAPI_OK\')"')
+
+    assert result.ok
+    assert str(project_python.resolve()) in str(captured["argv"][-1])
+    assert "project Python" in result.summary
+    assert "已使用项目 Python" in result.detail
 
 
 def test_echo_roundtrip(registry: Registry):
@@ -258,6 +383,9 @@ def test_cwd_is_workspace(registry: Registry, workspace: Path):
         ("python -m pytest tests/test_loop.py", "test"),
         (r"..\.venv\Scripts\python.exe -B -m pytest tests/test_loop.py -v", "test"),
         (r".\.venv\Scripts\python.exe -m unittest", "test"),
+        (r".\test.ps1", "test"),
+        ("./test.sh -q", "test"),
+        (r"scripts\run-tests.cmd --all", "test"),
         ("npm run test -- --runInBand", "test"),
         ("cargo test --workspace", "test"),
         ("ctest --output-on-failure", "test"),
@@ -288,6 +416,8 @@ def test_verification_commands_are_classified(command: str, kind: str):
         "g++ --version",
         "ctest -N",
         "java Main",
+        r".\setup.ps1",
+        r".\test.ps1 | Out-Null",
     ],
 )
 def test_non_evidence_commands_are_rejected(command: str):

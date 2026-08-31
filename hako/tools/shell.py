@@ -121,6 +121,20 @@ _VERIFICATION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 
 _BARE_PYTEST = re.compile(r"(?i)^pytest(?:\.exe)?(?P<args>(?:\s+.*)?)$")
+_AMBIGUOUS_WINDOWS_PYTEST = re.compile(
+    r"(?i)^(?:pytest(?:\.exe)?|(?:python|py)(?:\.exe)?\s+(?:-B\s+)?-m\s+pytest)"
+    r"(?P<args>(?:\s+.*)?)$"
+)
+_PROJECT_TEST_SCRIPT = re.compile(
+    r"(?ix)^\s*(?:&\s*)?(?:"
+    r'"(?:[^"\r\n]*[\\/])?(?:test|tests|run[-_]?tests)\.(?:ps1|sh|cmd|bat)"|'
+    r"'(?:[^'\r\n]*[\\/])?(?:test|tests|run[-_]?tests)\.(?:ps1|sh|cmd|bat)'|"
+    r"(?:[^\s\"';&|]*[\\/])?(?:test|tests|run[-_]?tests)\.(?:ps1|sh|cmd|bat)"
+    r")(?:\s+.*)?$"
+)
+_BARE_WINDOWS_PYTHON = re.compile(
+    r"(?i)^python(?:\.exe)?(?P<args>(?:\s+.*)?)$"
+)
 
 
 class _CommandCancelled(RuntimeError):
@@ -211,10 +225,85 @@ def classify_verification(command: str) -> str | None:
         return None
     if _NON_EXECUTING_CHECK.search(candidate):
         return None
+    # 仓库自带测试入口与 npm test / mvnw test 的性质相同：它封装了项目实际
+    # 依赖环境和测试参数。只接受明确的测试脚本名，且复合命令门禁仍然生效。
+    if _PROJECT_TEST_SCRIPT.fullmatch(candidate):
+        return "test"
     for kind, pattern in _VERIFICATION_PATTERNS:
         if pattern.search(candidate):
             return kind
     return None
+
+
+def _windows_project_test_entry(command: str, workspace: Path | None) -> str | None:
+    """无定向参数的 pytest 请求优先走仓库声明的 Windows 测试入口。"""
+    if workspace is None or not (workspace / "test.ps1").is_file():
+        return None
+    match = _AMBIGUOUS_WINDOWS_PYTEST.fullmatch((command or "").strip())
+    if match is None:
+        return None
+    # PowerShell 会把 `-q` 等内容当成脚本自身的命名参数；项目入口已经自行
+    # 选择 pytest 参数，因此这里只接管无参数或仅 quiet 的全量测试请求。
+    if match.group("args").strip().lower() not in {"", "-q", "-qq", "--quiet"}:
+        return None
+    return "& '.\\test.ps1'"
+
+
+def _powershell_executable(path: str | Path) -> str:
+    quoted = str(path).replace("'", "''")
+    return f"& '{quoted}'"
+
+
+def _windows_project_python(workspace: Path | None) -> Path | None:
+    """解析仓库声明的 Python，而不是把 hako 自己的 venv 当成项目环境。
+
+    默认只查看 Workspace 内的常见 venv。演示仓库为便于反复 reset，把依赖环境
+    放在 work/ 的父目录；只有仓库自己的 test.ps1 明确引用该路径时才接受它，
+    避免无条件越界猜测父目录中的任意 Python。
+    """
+    if workspace is None:
+        return None
+
+    candidates = [
+        workspace / ".venv" / "Scripts" / "python.exe",
+        workspace / "venv" / "Scripts" / "python.exe",
+    ]
+    test_entry = workspace / "test.ps1"
+    if test_entry.is_file():
+        try:
+            declaration = test_entry.read_text(encoding="utf-8").replace("/", "\\").lower()
+        except OSError:
+            declaration = ""
+        for relative in (
+            r"..\.venv\scripts\python.exe",
+            r"..\venv\scripts\python.exe",
+        ):
+            if relative in declaration:
+                candidates.append((workspace / Path(relative)).resolve())
+
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved.is_file():
+            return resolved
+    return None
+
+
+def normalize_windows_python(
+    command: str,
+    *,
+    platform: str | None = None,
+    workspace: Path | None = None,
+    executable: Path | None = None,
+) -> str:
+    """把 bare python 绑定到可发现的项目环境；找不到时保持原命令。"""
+    candidate = (command or "").strip()
+    if (platform or sys.platform) != "win32":
+        return candidate
+    match = _BARE_WINDOWS_PYTHON.fullmatch(candidate)
+    project_python = executable or _windows_project_python(workspace)
+    if match is None or project_python is None:
+        return candidate
+    return f"{_powershell_executable(project_python)}{match.group('args')}"
 
 
 def normalize_windows_pytest(
@@ -222,22 +311,25 @@ def normalize_windows_pytest(
     *,
     platform: str | None = None,
     executable: str | None = None,
+    workspace: Path | None = None,
 ) -> str:
-    """Windows 上把 bare pytest 绑定到启动 hako 的 Python。
+    """Windows 上优先使用项目测试入口，否则把 bare pytest 绑定到当前 Python。
 
     PATH 里的 pytest.exe 可能来自系统 Python，而 hako 运行在 .venv；前者会让
-    同一仓库出现不同 sys.path，甚至诱使 Agent 写 conftest.py 修一个不存在的
-    项目问题。只改写明确的 bare `pytest[.exe]`，显式解释器命令保持原样。
+    同一仓库出现不同 sys.path。仓库若提供 test.ps1，则通用的 `pytest` 或
+    `python -m pytest` 请求优先交给它选择项目依赖环境；没有项目入口时只改写
+    bare `pytest[.exe]`，显式解释器命令仍保持原样。
     """
     candidate = (command or "").strip()
     if (platform or sys.platform) != "win32":
         return candidate
+    if project_command := _windows_project_test_entry(candidate, workspace):
+        return project_command
     match = _BARE_PYTEST.fullmatch(candidate)
     if match is None:
         return candidate
     python = executable or sys.executable
-    quoted = "'" + python.replace("'", "''") + "'"
-    return f"& {quoted} -m pytest{match.group('args')}"
+    return f"{_powershell_executable(python)} -m pytest{match.group('args')}"
 
 
 # PowerShell 自己的报错文本走 .NET Console，不受 PYTHONIOENCODING 管。
@@ -298,8 +390,27 @@ def make_run_command(
                 f"该命令需要交互输入，会导致 agent 卡死到超时：{requested_command}\n建议：{hint}"
             )
 
-        executed_command = normalize_windows_pytest(requested_command)
+        project_test_entry = _windows_project_test_entry(requested_command, workspace)
+        executed_command = normalize_windows_pytest(
+            requested_command,
+            workspace=workspace,
+        )
+        project_python = None
+        if executed_command == requested_command:
+            project_python = _windows_project_python(workspace)
+            executed_command = normalize_windows_python(
+                requested_command,
+                workspace=workspace,
+                executable=project_python,
+            )
         normalized = executed_command != requested_command
+        normalization_tag = (
+            "project test entry"
+            if project_test_entry is not None
+            else "project Python"
+            if project_python is not None and normalized
+            else "current Python"
+        )
 
         timeout = max(1, min(int(timeout), MAX_TIMEOUT))
         # 强制 UTF-8，否则 Windows 上 cp936 会把子进程输出解码成乱码
@@ -374,10 +485,14 @@ def make_run_command(
             parts.append(f"--- stderr ---\n{proc.stderr.rstrip()}")
         output = "\n".join(parts) or "(无输出)"
         if normalized:
-            output = (
-                "[hako] Windows bare pytest 已使用当前 Python 执行："
-                f"{executed_command}\n{output}"
+            normalization = (
+                "已使用仓库测试入口"
+                if project_test_entry is not None
+                else "已使用项目 Python"
+                if project_python is not None
+                else "Windows bare pytest 已使用当前 Python"
             )
+            output = f"[hako] {normalization}，执行：{executed_command}\n{output}"
         if audit_detail := effects.detail():
             output = f"{audit_detail}\n{output}"
 
@@ -389,7 +504,7 @@ def make_run_command(
 
         verification_kind = classify_verification(requested_command)
         summary_command = (
-            f"{requested_command} [current Python]"
+            f"{requested_command} [{normalization_tag}]"
             if normalized
             else requested_command
         )
@@ -421,7 +536,9 @@ def make_run_command(
             "不要执行需要交互输入或常驻不退出的命令（如 dev server）。"
             "修改文件优先使用 edit_file/write_file；shell 的净文件副作用会被审计并计入变更。"
             "验证改动请优先跑项目自带的测试命令。"
-            "Windows 上 bare pytest 会自动改为当前 Python 的 -m pytest，避免解释器错位。"
+            "Windows 上若存在 test.ps1，通用 pytest 请求会优先走该项目入口；"
+            "bare python 会在可发现时使用该仓库声明的项目环境，禁止猜测 .venv 路径；"
+            "否则 bare pytest 会改为当前 Python 的 -m pytest，避免解释器错位。"
         ),
         parameters={
             "type": "object",

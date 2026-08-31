@@ -22,7 +22,11 @@ from web.worker.protocol import (
 @pytest.mark.parametrize(
     ("event", "kind", "expected"),
     [
-        (ev.RunStarted(task="修复", model="m", cwd="D:/项目"), "run_started", {"cwd": "D:/项目"}),
+        (
+            ev.RunStarted(task="修复", model="gpt-5.2", cwd="D:/项目"),
+            "run_started",
+            {"cwd": "D:/项目", "model": "gpt-5.2"},
+        ),
         (ev.TurnStarted(step=2, max_steps=40), "turn_started", {"maxSteps": 40}),
         (ev.ContextStats(used_tokens=8, limit=100, message_count=3), "context_stats", {"messageCount": 3}),
         (

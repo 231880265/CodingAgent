@@ -4,13 +4,47 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from hako.config import Config, PROVIDERS
 
 
 def _clear_provider_keys(monkeypatch) -> None:
     # 设为空字符串而不是删除，防止开发机上的 .env 在测试中重新注入真实密钥。
+    monkeypatch.setenv("HAKO_API_KEY", "")
     for name in PROVIDERS:
         monkeypatch.setenv(name, "")
+
+
+def test_generic_api_configuration_takes_priority(monkeypatch, tmp_path: Path):
+    _clear_provider_keys(monkeypatch)
+    monkeypatch.setenv("HAKO_API_KEY", "generic-test-key")
+    monkeypatch.setenv("HAKO_BASE_URL", "https://gateway.example/v1")
+    monkeypatch.setenv("HAKO_MODEL", "gpt-compatible-model")
+    monkeypatch.setenv("HAKO_CONTEXT_LIMIT", "262144")
+    # 同时存在旧 Key 时也不产生含糊选择：通用配置明确优先。
+    monkeypatch.setenv("SILICONFLOW_API_KEY", "legacy-test-key")
+
+    config = Config.from_env(workspace=tmp_path)
+
+    assert config.api_key == "generic-test-key"
+    assert config.base_url == "https://gateway.example/v1"
+    assert config.model == "gpt-compatible-model"
+    assert config.context_limit == 262144
+
+
+@pytest.mark.parametrize("missing", ["HAKO_BASE_URL", "HAKO_MODEL"])
+def test_generic_api_configuration_requires_endpoint_and_model(
+    monkeypatch, tmp_path: Path, missing: str
+):
+    _clear_provider_keys(monkeypatch)
+    monkeypatch.setenv("HAKO_API_KEY", "generic-test-key")
+    monkeypatch.setenv("HAKO_BASE_URL", "https://gateway.example/v1")
+    monkeypatch.setenv("HAKO_MODEL", "gpt-compatible-model")
+    monkeypatch.setenv(missing, "")
+
+    with pytest.raises(SystemExit, match=missing):
+        Config.from_env(workspace=tmp_path)
 
 
 def test_siliconflow_defaults_to_deepseek_v4_flash(monkeypatch, tmp_path: Path):
