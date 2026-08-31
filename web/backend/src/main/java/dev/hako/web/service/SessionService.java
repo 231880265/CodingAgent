@@ -458,7 +458,32 @@ public class SessionService {
 
     public SessionSuspendResponse suspendSession(UUID sessionId) {
         synchronized (lock) {
-            SessionState session = requireSession(sessionId);
+            if (current == null || !current.sessionId.equals(sessionId)) {
+                ObjectNode stored = history.getHistory(sessionId);
+                if (stored == null) {
+                    throw new ApiException(
+                            HttpStatus.NOT_FOUND,
+                            "SESSION_NOT_FOUND",
+                            "Session 不存在。");
+                }
+                String storedStatus = stored.path("status").asText();
+                if (SessionStatus.SUSPENDED.name().equals(storedStatus)
+                        || SessionStatus.CLOSED.name().equals(storedStatus)
+                        || SessionStatus.FAILED.name().equals(storedStatus)) {
+                    // 浏览器可能跨过一次后端重启仍保留旧 Session。此时 Worker 已经
+                    // 不在当前进程里，历史状态也已持久化；再次挂起应当是幂等操作，
+                    // 不能用 SESSION_NOT_FOUND 阻塞用户进入新会话。
+                    return new SessionSuspendResponse(
+                            PROTOCOL_VERSION,
+                            sessionId,
+                            storedStatus);
+                }
+                throw new ApiException(
+                        HttpStatus.CONFLICT,
+                        "SESSION_NOT_ACTIVE",
+                        "Session 已不属于当前 Worker，请刷新历史状态后重试。");
+            }
+            SessionState session = current;
             if (session.status == SessionStatus.SUSPENDED) {
                 return new SessionSuspendResponse(PROTOCOL_VERSION, sessionId, "SUSPENDED");
             }
