@@ -121,7 +121,7 @@ describe("RunTimeline transcript hierarchy", () => {
       event("tool_call_started", {
         callId: "read-1",
         name: "read_file",
-        args: { path: "app/services/publish_service.py" },
+        args: { file_path: "app/services/publish_service.py" },
       }),
       event("tool_call_finished", {
         callId: "read-1",
@@ -217,7 +217,11 @@ describe("RunTimeline transcript hierarchy", () => {
       event("tool_call_started", {
         callId: "edit-1",
         name: "edit_file",
-        args: { path: "app/api/routes.py", old_text: "old route", new_text: "new route" },
+        args: {
+          file_path: "app/api/routes.py",
+          old_string: "old route",
+          new_string: "new route",
+        },
       }),
       event("tool_call_finished", {
         callId: "edit-1",
@@ -260,6 +264,9 @@ describe("RunTimeline transcript hierarchy", () => {
     expect(stream.querySelector(".change-activity-group .event-title-row")?.textContent)
       .toContain("已修改 3 个文件");
     expect(stream.querySelectorAll(".change-activity-group .read-file-item")).toHaveLength(3);
+    expect(stream.textContent).toContain("app/api/routes.py");
+    expect(stream.textContent).toContain("old route");
+    expect(stream.textContent).toContain("new route");
     expect(stream.textContent).toContain("tests/test_conflict.py");
   });
 

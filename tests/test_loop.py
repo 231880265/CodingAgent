@@ -77,6 +77,37 @@ def test_tool_then_finish(config, registry, bus, workspace: Path):
     assert any("x = 1" in str(m.get("content")) for m in client.seen[1])
 
 
+def test_claude_read_alias_completes_through_agent_loop(
+    config, registry, bus, workspace: Path
+):
+    """回归 Run1：Claude 的 file_path 必须得到真实内容，不能重复失败后 STUCK。"""
+    (workspace / "publish_service.py").write_text(
+        "published_revision_id = revision.id\n",
+        encoding="utf-8",
+    )
+    agent, client = agent_with(
+        [
+            reply(
+                "读取发布链路",
+                [call("read_file", {"file_path": "publish_service.py"})],
+            ),
+            reply("已看到发布版本字段"),
+        ],
+        config,
+        registry,
+        bus,
+    )
+
+    result = agent.run("调查发布后仍读取旧版本")
+
+    assert result.reason is StopReason.DONE_READ_ONLY
+    assert result.steps == 2
+    assert any(
+        "published_revision_id" in str(message.get("content"))
+        for message in client.seen[1]
+    )
+
+
 def test_usage_accumulates_from_api_not_estimate(config, registry, bus):
     agent, _ = agent_with(
         [

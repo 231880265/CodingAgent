@@ -5,6 +5,7 @@ import {
   formatTime,
   formatToolName,
   readPayload,
+  readStringArgument,
 } from "../utils/presentation";
 
 const props = defineProps<{
@@ -25,8 +26,8 @@ const verificationKind = computed(() =>
 const subject = computed(() => {
   const command = readPayload(args.value, "command");
   if (typeof command === "string") return command;
-  const path = readPayload(args.value, "path");
-  if (typeof path === "string") return path;
+  const path = readStringArgument(args.value, "path", "file_path");
+  if (path) return path;
   const changed = pathList("modifiedPaths")[0] ?? pathList("createdPaths")[0];
   return changed ?? "";
 });
@@ -122,8 +123,8 @@ const changeFacts = computed(() => {
   ] as const;
   return groups.filter(([, paths]) => paths.length > 0);
 });
-const oldText = computed(() => stringValue(readPayload(args.value, "old_text")));
-const newText = computed(() => stringValue(readPayload(args.value, "new_text")));
+const oldText = computed(() => readStringArgument(args.value, "old_text", "old_string"));
+const newText = computed(() => readStringArgument(args.value, "new_text", "new_string"));
 const writtenContent = computed(() => stringValue(readPayload(args.value, "content")));
 const hasChangePreview = computed(() =>
   Boolean(oldText.value) || Boolean(newText.value) || Boolean(writtenContent.value),

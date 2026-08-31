@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import type { ToolActivityPair } from "../utils/runPresentation";
-import { formatTime, readPayload } from "../utils/presentation";
+import { formatTime, readPayload, readStringArgument } from "../utils/presentation";
 
 const props = withDefaults(defineProps<{
   activities: ToolActivityPair[];
@@ -14,7 +14,7 @@ const rows = computed(() => props.activities.map((activity, index) => {
   const args = readPayload(activity.started?.payload, "args");
   const finished = activity.finished;
   const touched = stringList(readPayload(finished?.payload, "touchedPaths"));
-  const path = stringValue(readPayload(args, "path")) || touched[0] || `文件 ${index + 1}`;
+  const path = readStringArgument(args, "path", "file_path") || touched[0] || `文件 ${index + 1}`;
   const ok = readPayload(finished?.payload, "ok") === true;
   const detail = stringValue(readPayload(finished?.payload, "detail"));
   const durationMs = readPayload(finished?.payload, "durationMs");

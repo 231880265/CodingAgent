@@ -238,6 +238,113 @@ def test_missing_required_arg_reports_signature(registry: Registry):
     assert "path" in result.detail
 
 
+def test_claude_read_file_alias_is_normalized(registry: Registry, workspace: Path):
+    """Claude Code 的 Read 使用 file_path；不能因此陷入重复失败。"""
+    (workspace / "claude.py").write_text("value = 1\n", encoding="utf-8")
+
+    result = registry.invoke("read_file", {"file_path": "claude.py"})
+
+    assert result.ok
+    assert result.subject_path == "claude.py"
+    assert "value = 1" in result.detail
+
+
+def test_claude_write_file_alias_is_normalized(registry: Registry, workspace: Path):
+    result = registry.invoke(
+        "write_file",
+        {"file_path": "created.py", "content": "created = True\n"},
+    )
+
+    assert result.ok
+    assert result.touched_paths == ("created.py",)
+    assert (workspace / "created.py").read_text(encoding="utf-8") == "created = True\n"
+
+
+def test_claude_edit_aliases_are_normalized(registry: Registry, workspace: Path):
+    target = workspace / "service.py"
+    target.write_text("published = False\n", encoding="utf-8")
+
+    result = registry.invoke(
+        "edit_file",
+        {
+            "file_path": "service.py",
+            "old_string": "published = False",
+            "new_string": "published = True",
+        },
+    )
+
+    assert result.ok
+    assert result.touched_paths == ("service.py",)
+    assert target.read_text(encoding="utf-8") == "published = True\n"
+
+
+def test_claude_edit_replace_all_false_is_accepted(
+    registry: Registry, workspace: Path
+):
+    target = workspace / "safe.py"
+    target.write_text("enabled = False\n", encoding="utf-8")
+
+    result = registry.invoke(
+        "edit_file",
+        {
+            "file_path": "safe.py",
+            "old_string": "enabled = False",
+            "new_string": "enabled = True",
+            "replace_all": False,
+        },
+    )
+
+    assert result.ok
+    assert target.read_text(encoding="utf-8") == "enabled = True\n"
+
+
+def test_claude_edit_replace_all_true_preserves_unique_edit_safety(
+    registry: Registry, workspace: Path
+):
+    target = workspace / "unsafe.py"
+    target.write_text("value = 1\nvalue = 1\n", encoding="utf-8")
+
+    result = registry.invoke(
+        "edit_file",
+        {
+            "file_path": "unsafe.py",
+            "old_string": "value = 1",
+            "new_string": "value = 2",
+            "replace_all": True,
+        },
+    )
+
+    assert not result.ok
+    assert "replace_all=true" in result.detail
+    assert target.read_text(encoding="utf-8") == "value = 1\nvalue = 1\n"
+
+
+def test_conflicting_canonical_and_alias_args_are_rejected(
+    registry: Registry, workspace: Path
+):
+    (workspace / "a.py").write_text("a = 1\n", encoding="utf-8")
+    (workspace / "b.py").write_text("b = 1\n", encoding="utf-8")
+
+    result = registry.invoke(
+        "read_file",
+        {"path": "a.py", "file_path": "b.py"},
+    )
+
+    assert not result.ok
+    assert "值不一致" in result.detail
+
+
+def test_model_aliases_are_not_published_in_tool_schema(registry: Registry):
+    schemas = {
+        schema["function"]["name"]: schema["function"]["parameters"]
+        for schema in registry.schemas()
+    }
+
+    assert "file_path" not in schemas["read_file"]["properties"]
+    assert "old_string" not in schemas["edit_file"]["properties"]
+    assert "new_string" not in schemas["edit_file"]["properties"]
+
+
 def test_unknown_arg_dropped(registry: Registry, workspace: Path):
     """模型常自作主张加 explanation / thought 之类的字段。
     为此报错太脆——静默丢弃，让真正的调用继续。"""

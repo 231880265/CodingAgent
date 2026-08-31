@@ -18,6 +18,7 @@ from hako.tools.shell import (
     classify_verification,
     is_dangerous,
     make_run_command,
+    normalize_model_run_command_args,
     normalize_windows_python,
     normalize_windows_pytest,
     shell_argv,
@@ -116,6 +117,58 @@ def test_windows_bare_python_does_not_guess_parent_environment(tmp_path: Path):
         platform="win32",
         workspace=workspace,
     ) == "python -c \"print('safe')\""
+
+
+def test_windows_claude_local_venv_uses_declared_project_environment(
+    tmp_path: Path,
+):
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    project_python = tmp_path / ".venv" / "Scripts" / "python.exe"
+    project_python.parent.mkdir(parents=True)
+    project_python.write_text("", encoding="utf-8")
+    (workspace / "test.ps1").write_text(
+        '$python = Join-Path $PSScriptRoot "..\\.venv\\Scripts\\python.exe"\n',
+        encoding="utf-8",
+    )
+
+    normalized = normalize_windows_python(
+        '.\\.venv\\Scripts\\python.exe -c "import fastapi"',
+        platform="win32",
+        workspace=workspace,
+    )
+
+    assert normalized == f"& '{project_python.resolve()}' -c \"import fastapi\""
+
+
+def test_claude_timeout_milliseconds_are_converted_without_changing_seconds():
+    assert normalize_model_run_command_args({"command": "pytest", "timeout": 120000}) == {
+        "command": "pytest",
+        "timeout": 120,
+    }
+    assert normalize_model_run_command_args({"command": "pytest", "timeout": 120}) == {
+        "command": "pytest",
+        "timeout": 120,
+    }
+
+
+def test_claude_foreground_flag_is_accepted_and_background_is_rejected(
+    workspace: Path,
+):
+    registry = Registry([make_run_command(workspace)])
+
+    foreground = registry._validate(
+        registry.get("run_command"),
+        {"command": "echo foreground", "run_in_background": False},
+    )
+    background = registry.invoke(
+        "run_command",
+        {"command": "echo background", "run_in_background": True},
+    )
+
+    assert foreground == {"command": "echo foreground"}
+    assert not background.ok
+    assert "run_in_background=true" in background.detail
 
 
 def test_run_command_records_the_normalized_windows_pytest(

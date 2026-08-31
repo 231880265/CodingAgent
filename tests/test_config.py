@@ -50,9 +50,11 @@ def test_generic_api_configuration_requires_endpoint_and_model(
 def test_siliconflow_defaults_to_deepseek_v4_flash(monkeypatch, tmp_path: Path):
     _clear_provider_keys(monkeypatch)
     monkeypatch.setenv("SILICONFLOW_API_KEY", "test-key")
-    monkeypatch.delenv("HAKO_BASE_URL", raising=False)
-    monkeypatch.delenv("HAKO_MODEL", raising=False)
-    monkeypatch.delenv("HAKO_CONTEXT_LIMIT", raising=False)
+    # 空值会阻止开发机 .env 的 Claude/LMU 配置重新注入测试进程，确保这里
+    # 真正验证旧的硅基流动专用 Key 默认值，而不是依赖测试机当前配置。
+    monkeypatch.setenv("HAKO_BASE_URL", "")
+    monkeypatch.setenv("HAKO_MODEL", "")
+    monkeypatch.setenv("HAKO_CONTEXT_LIMIT", "")
 
     config = Config.from_env(workspace=tmp_path)
 
@@ -67,9 +69,9 @@ def test_siliconflow_defaults_to_deepseek_v4_flash(monkeypatch, tmp_path: Path):
 def test_deepseek_defaults_to_current_v4_flash_name(monkeypatch, tmp_path: Path):
     _clear_provider_keys(monkeypatch)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
-    monkeypatch.delenv("HAKO_BASE_URL", raising=False)
-    monkeypatch.delenv("HAKO_MODEL", raising=False)
-    monkeypatch.delenv("HAKO_CONTEXT_LIMIT", raising=False)
+    monkeypatch.setenv("HAKO_BASE_URL", "")
+    monkeypatch.setenv("HAKO_MODEL", "")
+    monkeypatch.setenv("HAKO_CONTEXT_LIMIT", "")
 
     config = Config.from_env(workspace=tmp_path)
 

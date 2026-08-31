@@ -75,6 +75,24 @@ def test_delegate_is_physically_read_only(config, workspace: Path):
     assert all(names == ["read_file", "list_dir"] for names in child.tool_names)
 
 
+def test_claude_agent_prompt_alias_is_normalized(config, workspace: Path):
+    (workspace / "a.py").write_text("value = 1\n", encoding="utf-8")
+    child = _child_client()
+    tool = make_delegate_readonly(
+        config,
+        EventBus(),
+        client_factory=lambda: child,
+    )
+
+    result = Registry([tool]).invoke(
+        "delegate_readonly",
+        {"prompt": "只读调查 a.py"},
+    )
+
+    assert result.ok
+    assert "观察" in result.detail
+
+
 def test_parent_counts_child_tokens_and_enforces_one_delegation(
     config, workspace: Path
 ):

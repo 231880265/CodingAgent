@@ -4,11 +4,28 @@ from __future__ import annotations
 
 from difflib import SequenceMatcher
 from pathlib import Path
+from typing import Any
 
 from ..truncate import clip_lines
 from .base import Tool, ToolError, ToolResult, rel, resolve_in_workspace
 
 DEFAULT_READ_LIMIT = 200
+
+
+def _normalize_model_edit_args(args: dict[str, Any]) -> dict[str, Any]:
+    """兼容 Claude Code Edit 的 replace_all，但不放宽唯一定位约束。"""
+    normalized = dict(args)
+    replace_all = normalized.pop("replace_all", None)
+    if replace_all is None:
+        return normalized
+    if isinstance(replace_all, str):
+        replace_all = replace_all.strip().lower() in {"1", "true", "yes"}
+    if bool(replace_all):
+        raise ToolError(
+            "edit_file 不支持 replace_all=true；为避免批量改错，本工具只接受唯一匹配。"
+            "请增加 old_string/old_text 的前后文，或拆成多次可审计的局部编辑"
+        )
+    return normalized
 
 
 def _read_text_with_encoding(target: Path, *, allow_lossy: bool = True) -> tuple[str, str]:
@@ -138,6 +155,7 @@ def make_read_file(workspace: Path) -> Tool:
         },
         handler=handler,
         read_only=True,
+        argument_aliases={"file_path": "path"},
     )
 
 
@@ -184,6 +202,7 @@ def make_write_file(workspace: Path) -> Tool:
         },
         handler=handler,
         needs_approval=True,
+        argument_aliases={"file_path": "path"},
     )
 
 
@@ -279,6 +298,12 @@ def make_edit_file(workspace: Path) -> Tool:
         },
         handler=handler,
         needs_approval=True,
+        argument_aliases={
+            "file_path": "path",
+            "old_string": "old_text",
+            "new_string": "new_text",
+        },
+        argument_adapter=_normalize_model_edit_args,
     )
 
 

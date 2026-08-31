@@ -110,3 +110,11 @@ export function readPayload(payload: unknown, key: string): unknown {
   if (!payload || typeof payload !== "object") return undefined;
   return (payload as Record<string, unknown>)[key];
 }
+
+export function readStringArgument(args: unknown, ...keys: string[]): string {
+  for (const key of keys) {
+    const value = readPayload(args, key);
+    if (typeof value === "string" && value.length > 0) return value;
+  }
+  return "";
+}

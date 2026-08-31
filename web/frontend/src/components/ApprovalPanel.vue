@@ -21,10 +21,11 @@ const primarySubject = computed(() => {
   const args = props.approval.tool.args;
   if (typeof args.command === "string") return args.command;
   if (typeof args.path === "string") return args.path;
+  if (typeof args.file_path === "string") return args.file_path;
   return "查看完整参数";
 });
-const oldText = computed(() => props.approval.tool.args.old_text);
-const newText = computed(() => props.approval.tool.args.new_text);
+const oldText = computed(() => props.approval.tool.args.old_text ?? props.approval.tool.args.old_string);
+const newText = computed(() => props.approval.tool.args.new_text ?? props.approval.tool.args.new_string);
 const purpose = computed(() => describeApprovalPurpose(
   props.approval.tool.name,
   props.approval.tool.args,

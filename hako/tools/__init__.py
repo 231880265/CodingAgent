@@ -46,15 +46,21 @@ class Registry:
         schema = tool.parameters
         props: dict[str, Any] = schema.get("properties", {})
         required: list[str] = schema.get("required", [])
+        normalized = _normalize_aliases(tool, args)
+        if tool.argument_adapter is not None:
+            normalized = tool.argument_adapter(normalized)
 
-        missing = [key for key in required if key not in args or args[key] is None]
+        missing = [
+            key for key in required
+            if key not in normalized or normalized[key] is None
+        ]
         if missing:
             raise ToolError(
                 f"缺少必填参数 {missing}。{tool.name} 的参数：{_signature(props, required)}"
             )
 
         cleaned: dict[str, Any] = {}
-        for key, value in args.items():
+        for key, value in normalized.items():
             if key not in props:
                 # 多余字段丢掉而不是报错：模型偶尔会加 "explanation" 之类的字段，
                 # 为此中断一整轮不值得。真正缺东西的情况上面已经拦住了。
@@ -98,6 +104,26 @@ def _coerce(key: str, value: Any, expected: str | None, tool_name: str) -> Any:
     if expected == "string" and not isinstance(value, str):
         return str(value)
     return value
+
+
+def _normalize_aliases(tool: Tool, args: dict[str, Any]) -> dict[str, Any]:
+    """把已知模型方言归一化成 hako 的公开参数名。
+
+    只处理 Tool 显式登记的一对一别名。若模型同时给出别名和正式字段且值冲突，
+    必须拒绝而不是猜测；这能兼容常见方言，又不降低工具边界的确定性。
+    """
+    normalized = dict(args)
+    for alias, canonical in tool.argument_aliases.items():
+        if alias not in normalized:
+            continue
+        alias_value = normalized.pop(alias)
+        if canonical in normalized and normalized[canonical] != alias_value:
+            raise ToolError(
+                f"{tool.name} 的参数 {alias} 与 {canonical} 同时出现且值不一致；"
+                f"请只使用正式参数 {canonical}"
+            )
+        normalized.setdefault(canonical, alias_value)
+    return normalized
 
 
 def _signature(props: dict[str, Any], required: list[str]) -> str:

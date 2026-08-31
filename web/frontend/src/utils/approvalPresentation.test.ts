@@ -12,7 +12,9 @@ describe("describeApprovalPurpose", () => {
   });
 
   it("explains that file edits are immediate and are not rollback", () => {
-    const purpose = describeApprovalPurpose("edit_file", { path: "app/services/campaign_service.py" });
+    const purpose = describeApprovalPurpose("edit_file", {
+      file_path: "app/services/campaign_service.py",
+    });
 
     expect(purpose).toContain("campaign_service.py");
     expect(purpose).toContain("立即写入");

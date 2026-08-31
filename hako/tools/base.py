@@ -8,12 +8,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
 
 DangerCheck = Callable[[dict[str, Any]], str | None]
+ArgumentAdapter = Callable[[dict[str, Any]], dict[str, Any]]
 
 
 @dataclass
@@ -81,6 +82,14 @@ class Tool:
     danger_check: DangerCheck | None = None
     # 0 表示不限。昂贵的委派工具可限制每个 Agent.run 的调用次数。
     max_calls_per_run: int = 0
+    # 某些模型带有训练期工具习惯，例如 Claude Code 的 Read/Edit 使用
+    # file_path / old_string / new_string。这里仅声明语义完全等价的入参别名，
+    # Registry 在校验前把它们归一化；别名不会发布进 Tool Schema，模型看到的
+    # 仍是 hako 唯一、稳定的公开契约。
+    argument_aliases: dict[str, str] = field(default_factory=dict)
+    # 少数同名字段在不同模型工具中单位或语义不同（例如 Claude Code Bash 的
+    # timeout 使用毫秒）。适配器只运行在 Registry 边界，不改变公开 Schema。
+    argument_adapter: ArgumentAdapter | None = None
 
     def danger_reason(self, args: dict[str, Any]) -> str | None:
         return self.danger_check(args) if self.danger_check is not None else None

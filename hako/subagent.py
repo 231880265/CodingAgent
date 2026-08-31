@@ -135,4 +135,5 @@ def make_delegate_readonly(
         read_only=True,
         needs_approval=False,
         max_calls_per_run=1,
+        argument_aliases={"prompt": "task"},
     )

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import type { ToolActivityPair } from "../utils/runPresentation";
-import { formatTime, readPayload } from "../utils/presentation";
+import { formatTime, readPayload, readStringArgument } from "../utils/presentation";
 
 const props = defineProps<{ activities: ToolActivityPair[] }>();
 
@@ -11,7 +11,7 @@ const rows = computed(() => props.activities.map((activity, index) => {
   const created = stringList(readPayload(finished?.payload, "createdPaths"));
   const modified = stringList(readPayload(finished?.payload, "modifiedPaths"));
   const deleted = stringList(readPayload(finished?.payload, "deletedPaths"));
-  const path = stringValue(readPayload(args, "path"))
+  const path = readStringArgument(args, "path", "file_path")
     || created[0]
     || modified[0]
     || deleted[0]
@@ -32,8 +32,8 @@ const rows = computed(() => props.activities.map((activity, index) => {
       .join("\n\n"),
     duration: typeof durationMs === "number" ? `${durationMs} ms` : "",
     occurredAt: finished?.occurredAt ?? activity.started?.occurredAt ?? "",
-    oldText: stringValue(readPayload(args, "old_text")),
-    newText: stringValue(readPayload(args, "new_text")),
+    oldText: readStringArgument(args, "old_text", "old_string"),
+    newText: readStringArgument(args, "new_text", "new_string"),
     content: stringValue(readPayload(args, "content")),
   };
 }));

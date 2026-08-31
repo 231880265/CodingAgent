@@ -2,7 +2,12 @@
 import { computed, nextTick, ref, watch } from "vue";
 import { Skeleton } from "vant";
 import type { HakoEvent } from "../types/api";
-import { formatTime, formatTokens, readPayload } from "../utils/presentation";
+import {
+  formatTime,
+  formatTokens,
+  readPayload,
+  readStringArgument,
+} from "../utils/presentation";
 import { deriveRunPresentation } from "../utils/runPresentation";
 import EventItem from "./EventItem.vue";
 import GoalResult from "./GoalResult.vue";
@@ -371,7 +376,7 @@ function toolSubject(events: HakoEvent[], finished: HakoEvent): string {
       && stringValue(readPayload(event.payload, "callId")) === callId,
   );
   const args = readPayload(started?.payload, "args");
-  return stringValue(readPayload(args, "path")) || stringValue(readPayload(args, "command"));
+  return readStringArgument(args, "path", "file_path") || stringValue(readPayload(args, "command"));
 }
 
 function changedPathCount(events: HakoEvent[]): number {

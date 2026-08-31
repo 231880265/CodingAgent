@@ -20,7 +20,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from ..fs_audit import diff_snapshots, snapshot_workspace
 from ..truncate import clip_text
@@ -134,6 +134,11 @@ _PROJECT_TEST_SCRIPT = re.compile(
 )
 _BARE_WINDOWS_PYTHON = re.compile(
     r"(?i)^python(?:\.exe)?(?P<args>(?:\s+.*)?)$"
+)
+_LOCAL_WINDOWS_PYTHON = re.compile(
+    r"(?ix)^(?:&\s*)?(?:\"|')?"
+    r"(?:\.?[\\/])?(?:\.venv|venv)[\\/]scripts[\\/]python(?:\.exe)?"
+    r"(?:\"|')?(?P<args>(?:\s+.*)?)$"
 )
 
 
@@ -295,15 +300,49 @@ def normalize_windows_python(
     workspace: Path | None = None,
     executable: Path | None = None,
 ) -> str:
-    """把 bare python 绑定到可发现的项目环境；找不到时保持原命令。"""
+    """把 bare python 或常见本地 venv 猜测绑定到仓库声明的环境。"""
     candidate = (command or "").strip()
     if (platform or sys.platform) != "win32":
         return candidate
     match = _BARE_WINDOWS_PYTHON.fullmatch(candidate)
+    if match is None:
+        # Claude Code 常先猜 `.venv/Scripts/python.exe`。PromoOps 的环境由
+        # test.ps1 声明在父目录；只有 _windows_project_python 已确认该声明时
+        # 才改写，绝不从 Workspace 外任意猜一个解释器。
+        match = _LOCAL_WINDOWS_PYTHON.fullmatch(candidate)
     project_python = executable or _windows_project_python(workspace)
     if match is None or project_python is None:
         return candidate
     return f"{_powershell_executable(project_python)}{match.group('args')}"
+
+
+def normalize_model_run_command_args(args: dict[str, Any]) -> dict[str, Any]:
+    """归一化 Claude Code Bash 常见字段，同时保留 hako 的同步执行契约。"""
+    normalized = dict(args)
+    background = normalized.pop("run_in_background", None)
+    if isinstance(background, str):
+        lowered = background.strip().lower()
+        if lowered in {"true", "1", "yes"}:
+            background = True
+        elif lowered in {"false", "0", "no", ""}:
+            background = False
+    if background is True:
+        raise ToolError(
+            "run_command 不支持 run_in_background=true；hako 必须同步取得退出码、"
+            "文件副作用和验证证据。请改用会结束的一次性前台命令"
+        )
+
+    timeout = normalized.get("timeout")
+    if timeout is not None and not isinstance(timeout, bool):
+        try:
+            numeric = int(str(timeout).strip())
+        except (TypeError, ValueError):
+            return normalized
+        # hako 的公开 Schema 是秒且上限 600；Claude Code Bash 常用毫秒。
+        # 合法的 1..600 秒完全不变，只对超出秒制上限、落在毫秒范围内的值转换。
+        if MAX_TIMEOUT < numeric <= MAX_TIMEOUT * 1000:
+            normalized["timeout"] = max(1, (numeric + 999) // 1000)
+    return normalized
 
 
 def normalize_windows_pytest(
@@ -554,4 +593,5 @@ def make_run_command(
         handler=handler,
         needs_approval=True,
         danger_check=lambda args: is_dangerous(str(args.get("command", ""))),
+        argument_adapter=normalize_model_run_command_args,
     )

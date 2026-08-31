@@ -1,6 +1,9 @@
-function stringArg(args: Record<string, unknown>, key: string): string {
-  const value = args[key];
-  return typeof value === "string" ? value.trim() : "";
+function stringArg(args: Record<string, unknown>, ...keys: string[]): string {
+  for (const key of keys) {
+    const value = args[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
 }
 
 function commandPath(command: string): string {
@@ -12,7 +15,7 @@ export function describeApprovalPurpose(
   toolName: string,
   args: Record<string, unknown>,
 ): string {
-  const path = stringArg(args, "path");
+  const path = stringArg(args, "path", "file_path");
   const command = stringArg(args, "command");
 
   if (toolName === "run_command") {
