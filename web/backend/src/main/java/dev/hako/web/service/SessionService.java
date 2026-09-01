@@ -62,6 +62,8 @@ public class SessionService {
             "tool_call_started",
             "tool_call_finished",
             "context_stats",
+            "acceptance_planned",
+            "acceptance_required",
             "verification_required",
             "continuation_required",
             "subagent_started",

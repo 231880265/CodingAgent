@@ -42,6 +42,8 @@ export const EVENT_LABELS: Record<HakoEventType, string> = {
   tool_call_started: "工具开始",
   tool_call_finished: "工具结果",
   context_stats: "上下文",
+  acceptance_planned: "验收计划",
+  acceptance_required: "验收项未满足",
   verification_required: "需要验证",
   continuation_required: "继续行动",
   subagent_started: "只读调查开始",

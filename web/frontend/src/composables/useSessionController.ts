@@ -22,6 +22,7 @@ const ACTIVE_RUN_STATES = new Set<RunStatus>([
   "WAITING_APPROVAL",
   "CANCELLING",
 ]);
+const EVENT_BATCH_WINDOW_MS = 75;
 
 export function useSessionController() {
   const session = ref<SessionResource | null>(null);
@@ -38,6 +39,8 @@ export function useSessionController() {
   const selectedHistory = ref<SessionHistory | null>(null);
   const receivedEventIds = new Set<number>();
   let closeStream: (() => void) | null = null;
+  let queuedEvents: HakoEvent[] = [];
+  let eventFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
   const currentRun = computed(() => session.value?.currentRun ?? null);
   const runStatus = computed<RunStatus | "IDLE">(
@@ -272,8 +275,27 @@ export function useSessionController() {
     if (!session.value || event.sessionId !== session.value.sessionId) return;
     if (receivedEventIds.has(event.eventId)) return;
     receivedEventIds.add(event.eventId);
-    events.value.push(event);
+    queuedEvents.push(event);
+    eventFlushTimer ??= setTimeout(flushEventBatch, EVENT_BATCH_WINDOW_MS);
+  }
 
+  function flushEventBatch(): void {
+    eventFlushTimer = null;
+    const sessionId = session.value?.sessionId;
+    const batch = queuedEvents;
+    queuedEvents = [];
+    if (!sessionId) return;
+    const currentBatch = batch.filter((event) => event.sessionId === sessionId);
+    if (!currentBatch.length) return;
+
+    // SSE 仍逐条实时到达；这里只把同一时间窗内的响应式提交合并成一次，
+    // 避免高频工具事件触发几十次重复计算和 DOM 重绘。
+    events.value.push(...currentBatch);
+    for (const event of currentBatch) applyEventState(event);
+  }
+
+  function applyEventState(event: HakoEvent): void {
+    if (!session.value || event.sessionId !== session.value.sessionId) return;
     if (event.type === "session_status") {
       const current = readString(event.payload, "current") as SessionStatus | null;
       if (current) session.value.status = current;
@@ -410,6 +432,7 @@ export function useSessionController() {
   }
 
   function seedStoredTimeline(stored: SessionHistory): void {
+    clearEventBatch();
     const latest = stored.runs.at(-1);
     events.value = stored.events.map((event) => structuredClone(event));
     receivedEventIds.clear();
@@ -457,6 +480,7 @@ export function useSessionController() {
   }
 
   function resetTimeline(): void {
+    clearEventBatch();
     events.value = [];
     summary.value = null;
     model.value = null;
@@ -477,6 +501,12 @@ export function useSessionController() {
     closeStream = null;
   }
 
+  function clearEventBatch(): void {
+    if (eventFlushTimer) clearTimeout(eventFlushTimer);
+    eventFlushTimer = null;
+    queuedEvents = [];
+  }
+
   function rememberSessionInUrl(sessionId: string): void {
     if (gatewayMode !== "api") return;
     const url = new URL(window.location.href);
@@ -491,7 +521,10 @@ export function useSessionController() {
     window.history.replaceState(null, "", url);
   }
 
-  onBeforeUnmount(() => closeStream?.());
+  onBeforeUnmount(() => {
+    finishStream();
+    clearEventBatch();
+  });
 
   return {
     gatewayMode: gatewayMode as "mock" | "api",

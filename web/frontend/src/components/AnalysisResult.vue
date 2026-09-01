@@ -10,14 +10,12 @@ import ToolActivity from "./ToolActivity.vue";
 
 type TraceEntry =
   | { kind: "tool"; key: string; activity: ToolActivityPair }
-  | { kind: "read-group"; key: string; activities: ToolActivityPair[] }
-  | { kind: "workspace-group"; key: string; activities: ToolActivityPair[] };
+  | { kind: "exploration-group"; key: string; activities: ToolActivityPair[] };
 
 const props = defineProps<{ event: HakoEvent; view: RunPresentation }>();
 const traceEntries = computed<TraceEntry[]>(() => {
   const entries: TraceEntry[] = [];
   let pending: ToolActivityPair[] = [];
-  let pendingTool = "";
   const flushPending = (): void => {
     const first = pending[0];
     if (!first) return;
@@ -25,20 +23,17 @@ const traceEntries = computed<TraceEntry[]>(() => {
       entries.push({ kind: "tool", key: first.key, activity: first });
     } else {
       entries.push({
-        kind: pendingTool === "list_dir" ? "workspace-group" : "read-group",
-        key: `analysis-${pendingTool}-group-${first.key}-${pending.at(-1)?.key}`,
+        kind: "exploration-group",
+        key: `analysis-exploration-group-${first.key}-${pending.at(-1)?.key}`,
         activities: pending,
       });
     }
     pending = [];
-    pendingTool = "";
   };
 
   for (const activity of props.view.toolActivities) {
     const name = toolName(activity);
     if (["read_file", "list_dir"].includes(name)) {
-      if (pendingTool && pendingTool !== name) flushPending();
-      pendingTool = name;
       pending.push(activity);
       continue;
     }
@@ -79,9 +74,9 @@ function toolName(activity: ToolActivityPair): string {
       <div class="analysis-trace-list">
         <template v-for="entry in traceEntries" :key="entry.key">
           <ReadActivityGroup
-            v-if="entry.kind === 'read-group' || entry.kind === 'workspace-group'"
+            v-if="entry.kind === 'exploration-group'"
             :activities="entry.activities"
-            :kind="entry.kind === 'workspace-group' ? 'workspace' : 'read'"
+            kind="exploration"
           />
           <ToolActivity
             v-else

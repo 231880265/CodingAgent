@@ -10,10 +10,21 @@ from pathlib import Path
 from typing import Callable
 
 from . import events as ev
+from .acceptance import (
+    AcceptanceCoverage,
+    AcceptancePlan,
+    acceptance_nudge,
+    build_acceptance_plan,
+    evaluate_acceptance,
+)
 from .config import Config
 from .history import Conversation
 from .llm import LLMClient, ModelReply
 from .prompt import build_system_prompt
+from .project_instructions import (
+    load_project_instructions,
+    render_project_instructions,
+)
 from .tools import Registry, Tool, ToolResult
 
 # 同一调用重复到第 N 次就判定卡死。取 3 而不是 2：
@@ -55,8 +66,12 @@ class VerificationEvidence:
 class _RunState:
     changed_paths: set[str] = field(default_factory=set)
     evidence: list[VerificationEvidence] = field(default_factory=list)
+    acceptance_plan: AcceptancePlan = field(default_factory=AcceptancePlan)
+    acceptance_nudged: bool = False
     verification_nudged: bool = False
     continuation_nudges: int = 0
+    read_continuations: dict[str, int] = field(default_factory=dict)
+    completed_reads: set[str] = field(default_factory=set)
 
     def record_change(self, paths: tuple[str, ...]) -> None:
         self.changed_paths.update(paths)
@@ -140,7 +155,10 @@ class Agent:
                 system_prompt
                 if system_prompt is not None
                 else build_system_prompt(config.workspace, registry.names())
-            )
+            ),
+            project_instructions=render_project_instructions(
+                load_project_instructions(config.workspace)
+            ),
         )
 
     # ------------------------------------------------------------ 主循环
@@ -159,7 +177,13 @@ class Agent:
 
         call_counts: dict[str, int] = {}
         tool_call_counts: dict[str, int] = {}
-        state = _RunState()
+        state = _RunState(acceptance_plan=build_acceptance_plan(task))
+        if state.acceptance_plan.active:
+            self.bus.emit(
+                ev.AcceptancePlanned(
+                    items=tuple(item.label for item in state.acceptance_plan.items)
+                )
+            )
         final_text = ""
         step = 0
 
@@ -221,6 +245,24 @@ class Agent:
                     return self._finish(
                         StopReason.INCOMPLETE, step, final_text, state
                     )
+                delivery_coverage = self._delivery_coverage(state)
+                if delivery_coverage.missing:
+                    if not state.acceptance_nudged and step < self.config.max_steps:
+                        state.acceptance_nudged = True
+                        message = acceptance_nudge(delivery_coverage)
+                        self.conversation.add_user(message, semantic=False)
+                        self.bus.emit(
+                            ev.AcceptanceRequired(
+                                missing_items=tuple(
+                                    item.label for item in delivery_coverage.missing
+                                ),
+                                message=message,
+                            )
+                        )
+                        continue
+                    return self._finish(
+                        StopReason.DONE_UNVERIFIED, step, final_text, state
+                    )
                 if not state.changed_paths:
                     return self._finish(
                         StopReason.DONE_READ_ONLY, step, final_text, state
@@ -263,6 +305,20 @@ class Agent:
             and reply.completion_tokens >= self.config.max_output_tokens
         )
 
+    @staticmethod
+    def _delivery_coverage(state: _RunState) -> AcceptanceCoverage:
+        """只检查交付面；验证缺失仍由专门的 Verified Finish 提醒负责。"""
+
+        coverage = evaluate_acceptance(
+            state.acceptance_plan,
+            changed_paths=state.changed_paths,
+            has_verification=bool(state.evidence),
+        )
+        delivery_missing = tuple(
+            item for item in coverage.missing if item.evidence_kind != "verification"
+        )
+        return AcceptanceCoverage(coverage.covered, delivery_missing)
+
     # ------------------------------------------------------------ 工具执行
 
     def _execute_calls(
@@ -290,8 +346,27 @@ class Agent:
             tool = self.registry.get(call.name)
             tool_call_counts[call.name] = tool_call_counts.get(call.name, 0) + 1
 
-            # 无进展检测
-            signature = f"{call.name}:{json.dumps(call.args, sort_keys=True, ensure_ascii=False)}"
+            requested_args = dict(call.args)
+            raw_signature = (
+                f"{call.name}:"
+                f"{json.dumps(requested_args, sort_keys=True, ensure_ascii=False)}"
+            )
+            execution_args = dict(requested_args)
+            auto_continued = False
+            # Claude 等模型有时会忽略读取结果文本末尾的 offset 提示，继续发出完全
+            # 相同的 read_file。若上一页明确声明还有内容，内核把这次重复解释为
+            # “继续下一页”；短文件和已经读到末尾的文件仍受原 stuck detector 约束。
+            if call.name == "read_file" and raw_signature not in state.completed_reads:
+                next_offset = state.read_continuations.get(raw_signature)
+                if next_offset is not None:
+                    execution_args["offset"] = next_offset
+                    auto_continued = True
+
+            # 无进展检测按实际执行参数计数；自动续读的每一页是不同调用。
+            signature = (
+                f"{call.name}:"
+                f"{json.dumps(execution_args, sort_keys=True, ensure_ascii=False)}"
+            )
             call_counts[signature] = call_counts.get(signature, 0) + 1
             repeats = call_counts[signature]
             if repeats >= STUCK_THRESHOLD:
@@ -303,7 +378,7 @@ class Agent:
             # 拒绝某次有副作用操作是 observation，不等于关闭 Run。模型可以据此
             # 选择只读调查或更安全的替代方案；取消则是独立且更高优先级的状态。
             if tool is not None and tool.needs_approval:
-                approved = self.approve(tool, call.args)
+                approved = self.approve(tool, execution_args)
                 if self.cancelled():
                     self.conversation.add_tool_result(
                         call.call_id, call.name, "本轮已由用户取消，工具未执行。"
@@ -319,7 +394,12 @@ class Agent:
                     continue
 
             self.bus.emit(
-                ev.ToolCallStarted(call_id=call.call_id, name=call.name, args=call.args)
+                ev.ToolCallStarted(
+                    call_id=call.call_id,
+                    name=call.name,
+                    args=execution_args,
+                    requested_args=(requested_args if auto_continued else {}),
+                )
             )
 
             started = time.perf_counter()
@@ -330,7 +410,7 @@ class Agent:
             ):
                 result = self._tool_limit_result(tool)
             else:
-                result = self.registry.invoke(call.name, call.args)
+                result = self.registry.invoke(call.name, execution_args)
             duration_ms = int((time.perf_counter() - started) * 1000)
 
             # 委派工具的模型调用也属于本次任务成本，不能从总 token 中隐身。
@@ -344,8 +424,15 @@ class Agent:
             made_progress = bool(result.touched_paths)
             if made_progress:
                 call_counts.clear()
+                state.read_continuations.clear()
+                state.completed_reads.clear()
 
             detail = result.detail
+            if auto_continued:
+                detail = (
+                    "[hako 自动续读] 模型重复请求了上一段；内核已从 "
+                    f"offset={execution_args.get('offset')} 继续。\n\n{detail}"
+                )
             # 阶梯式干预：第 2 次重复同一调用时先提醒，而不是直接判死。
             if not made_progress and repeats == STUCK_THRESHOLD - 1:
                 detail += (
@@ -358,8 +445,15 @@ class Agent:
                 call.call_id,
                 call.name,
                 detail,
-                path=result.subject_path or str(call.args.get("path", "")),
+                path=result.subject_path or str(execution_args.get("path", "")),
             )
+
+            if call.name == "read_file" and result.ok:
+                if result.next_offset is None:
+                    state.read_continuations.pop(raw_signature, None)
+                    state.completed_reads.add(raw_signature)
+                elif raw_signature not in state.completed_reads:
+                    state.read_continuations[raw_signature] = result.next_offset
 
             # 所有净副作用都让对应历史读取失效；只有作者交付内容的变更才推进
             # Verified Finish。编译产物保留审计，但不能把刚得到的构建证据冲掉。
@@ -393,6 +487,7 @@ class Agent:
                     verification_command=result.verification_command,
                     command_status=result.command_status,
                     exit_code=result.exit_code,
+                    next_offset=result.next_offset,
                 )
             )
             if self.cancelled():

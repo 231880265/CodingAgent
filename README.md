@@ -46,6 +46,7 @@ DONE_VERIFIED
 - Vue 3 + Vant 4 前端、Spring Boot REST/SSE 控制面、Python JSONL Worker
 - 一 Session 多 Run、仅取消当前 Run、文本附件、SQLite 历史、SUSPENDED 会话语义恢复
 - 三层记忆：当前 Conversation、事件确定性生成的 RunMemory、作为当前事实来源的 Workspace；`search_session_history` 可按需查找旧目标、修改、审批、失败和验证
+- 根目录 `AGENTS.md` 项目指令：有界读取并注入 system prompt 之后、用户目标之前；缺失时无影响，且不能覆盖安全、路径与审批规则
 
 核心 Agent 运行时只直接依赖 `openai` 与 `rich`。对话历史、工具定义与本地执行、模型输出解析、循环与终止条件、错误处理、权限和事件总线均在本仓库自行实现；没有使用 LangChain、LlamaIndex、OpenAI Agents SDK、Claude Agent SDK 等 Agent 框架，也没有把文件或命令执行托管给外部 API。
 
@@ -60,9 +61,9 @@ Run 1：发布 v2 显示成功，但刷新后线上仍读取 v1
   → 唯一匹配局部修复
   → 完整 pytest 通过
 
-Run 2：增加 Priority 与同优先级冲突反馈
+Run 2：在活动详情页增加 Priority 自助编辑
   → 在 Run 1 修改后的仓库继续开发
-  → API、领域逻辑、页面和回归测试共同演进
+  → 非负校验、持久化、页面和回归测试共同演进
   → 公开测试与外部 held-out 验收
 ```
 
@@ -77,6 +78,7 @@ hako/
   loop.py                       Agent 主循环和分层终止条件
   llm.py                        模型请求、重试、Tool Call 解析与 JSON 修补
   history.py                    Conversation 与陈旧读取失效
+  project_instructions.py       根目录 AGENTS.md 有界读取与优先级包装
   prompt.py                     系统行为约束与运行环境
   events.py                     内核与呈现层之间的事件总线
   fs_audit.py                   shell 工作区快照与净副作用比较
@@ -208,13 +210,13 @@ npm test
 npm run build
 ```
 
-2026-08-30 在当前工作树复测：
+2026-09-01 在当前工作树复测：
 
 | 范围 | 结果 |
 |---|---|
-| Python | `203 passed, 1 skipped` |
-| Spring Boot | `18 passed` |
-| Vue/Vitest | `34 passed` |
+| Python | `247 passed, 1 skipped` |
+| Spring Boot | `25 passed` |
+| Vue/Vitest | `40 passed` |
 | 前端生产构建 | TypeScript 检查通过，`324 modules transformed` |
 
 GitHub Actions 在 Windows 与 Ubuntu、Python 3.12 上运行 Python 核心测试。真实模型测试不进入 CI，避免提交密钥、产生外部费用并混入网络服务波动。

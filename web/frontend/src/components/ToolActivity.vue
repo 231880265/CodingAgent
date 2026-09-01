@@ -70,6 +70,10 @@ const duration = computed(() => {
   const value = readPayload(props.finished?.payload, "durationMs");
   return typeof value === "number" ? `${value} ms` : "";
 });
+const mainMeta = computed(() => {
+  if (!props.finished) return "进行中";
+  return duration.value;
+});
 const noteText = computed(() =>
   (props.notes ?? [])
     .map((event) => stringValue(readPayload(event.payload, "text")))
@@ -176,7 +180,11 @@ function stringValue(value: unknown): string {
           <strong>{{ title }}<span v-if="!finished" class="progress-dots" aria-hidden="true">...</span></strong>
           <code v-if="subject" class="event-subject" :title="subject">{{ subject }}</code>
         </div>
-        <time v-if="source" class="event-meta" :datetime="source.occurredAt">{{ formatTime(source.occurredAt) }}</time>
+        <span
+          v-if="source && mainMeta"
+          class="event-meta"
+          :title="formatTime(source.occurredAt)"
+        >{{ mainMeta }}</span>
       </header>
 
       <p v-if="outcomeLine" class="tool-outcome">{{ outcomeLine }}</p>
@@ -184,7 +192,8 @@ function stringValue(value: unknown): string {
       <details v-if="hasDetails" class="event-detail">
         <summary>{{ detailsLabel }}</summary>
         <p v-if="noteText" class="agent-note-copy">{{ noteText }}</p>
-        <dl v-if="duration || changeFacts.length" class="tool-facts">
+        <dl v-if="source || duration || changeFacts.length" class="tool-facts">
+          <div v-if="source"><dt>时间</dt><dd>{{ formatTime(source.occurredAt) }}</dd></div>
           <div v-if="duration"><dt>耗时</dt><dd>{{ duration }}</dd></div>
           <div v-for="[label, paths] in changeFacts" :key="label">
             <dt>{{ label }}</dt>

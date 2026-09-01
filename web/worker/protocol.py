@@ -27,7 +27,7 @@ _EVENT_FIELDS: dict[str, tuple[str, ...]] = {
     "run_started": ("task", "model", "cwd"),
     "turn_started": ("step", "max_steps"),
     "assistant_text": ("text",),
-    "tool_call_started": ("call_id", "name", "args"),
+    "tool_call_started": ("call_id", "name", "args", "requested_args"),
     "tool_call_finished": (
         "call_id",
         "name",
@@ -44,8 +44,11 @@ _EVENT_FIELDS: dict[str, tuple[str, ...]] = {
         "verification_command",
         "command_status",
         "exit_code",
+        "next_offset",
     ),
     "context_stats": ("used_tokens", "limit", "message_count"),
+    "acceptance_planned": ("items",),
+    "acceptance_required": ("missing_items", "message"),
     "verification_required": ("changed_paths", "message"),
     "continuation_required": (
         "attempt",

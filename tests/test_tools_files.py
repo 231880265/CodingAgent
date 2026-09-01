@@ -39,6 +39,7 @@ def test_read_offset_and_continuation_pointer(registry: Registry, workspace: Pat
     # 截断处必须留下可恢复的指针，而不是只说"被截断了"
     assert "offset=10" in result.detail
     assert "还有 490 行" in result.detail
+    assert result.next_offset == 10
 
 
 def test_read_last_page_has_no_pointer(registry: Registry, workspace: Path):
@@ -46,6 +47,7 @@ def test_read_last_page_has_no_pointer(registry: Registry, workspace: Path):
     result = read(registry, path="s.txt", offset=1, limit=50)
     assert "需要继续读" not in result.detail
     assert "2\tb" in result.detail
+    assert result.next_offset is None
 
 
 def test_read_missing_file_is_recoverable(registry: Registry):

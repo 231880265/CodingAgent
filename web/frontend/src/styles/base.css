@@ -624,6 +624,54 @@ pre,
 .read-file-detail > small { color: var(--ink-faint); font-size: 0.58rem; }
 .read-file-detail .detail-block { margin-top: 7px; }
 
+.file-change-group .event-title-row {
+  align-items: baseline;
+  gap: 9px;
+}
+
+.file-change-group .event-title-row code {
+  color: inherit;
+  font-size: 0.82em;
+}
+
+.file-change-status {
+  color: var(--ink-faint);
+  font-size: 0.6rem;
+  font-weight: 650;
+}
+
+.file-change-facts {
+  margin: 3px 0 0;
+  color: var(--ink-faint);
+  font-size: 0.66rem;
+}
+
+.file-change-detail { width: min(100%, 720px); }
+.file-change-detail > summary {
+  cursor: pointer;
+  color: var(--ink-faint);
+  font-weight: 640;
+}
+
+.file-change-calls {
+  display: grid;
+  gap: 0;
+  margin: 7px 0 0;
+  padding: 0 0 0 23px;
+  border-left: 1px solid var(--line);
+  color: var(--ink-faint);
+}
+
+.file-change-calls > li { padding: 4px 0 4px 4px; }
+.file-change-calls > li > details > summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  cursor: pointer;
+}
+.file-change-calls > li[data-state="error"] > details > summary { color: var(--danger); }
+.file-change-calls small { color: var(--ink-faint); }
+
 .timeline-event[data-variant="warning"] .event-marker {
   border-color: oklch(76% 0.08 75);
   background: var(--warning-soft);

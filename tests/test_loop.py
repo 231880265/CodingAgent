@@ -11,8 +11,10 @@ from pathlib import Path
 import pytest
 
 from hako.events import (
+    AcceptanceRequired,
     ContinuationRequired,
     EventBus,
+    ToolCallStarted,
     ToolCallFinished,
     VerificationRequired,
 )
@@ -106,6 +108,42 @@ def test_claude_read_alias_completes_through_agent_loop(
         "published_revision_id" in str(message.get("content"))
         for message in client.seen[1]
     )
+
+
+def test_repeated_claude_read_of_truncated_file_auto_continues_pages(
+    config, registry, bus, workspace: Path
+):
+    """Claude 忽略 offset 提示时，hako 续读下一页而不是误判 STUCK。"""
+    (workspace / "long.py").write_text(
+        "\n".join(f"line_{number}" for number in range(450)),
+        encoding="utf-8",
+    )
+    started: list[ToolCallStarted] = []
+    bus.subscribe(
+        lambda event: started.append(event)
+        if isinstance(event, ToolCallStarted)
+        else None
+    )
+    same = lambda: call("read_file", {"file_path": "long.py"})
+    agent, _ = agent_with(
+        [
+            reply("继续读取", [same()]),
+            reply("继续读取", [same()]),
+            reply("继续读取", [same()]),
+            reply("已读完"),
+        ],
+        config,
+        registry,
+        bus,
+    )
+
+    result = agent.run("分析 long.py，不修改代码")
+
+    assert result.reason is StopReason.DONE_READ_ONLY
+    assert [event.args.get("offset", 0) for event in started] == [0, 200, 400]
+    assert started[0].requested_args == {}
+    assert started[1].requested_args == {"file_path": "long.py"}
+    assert started[2].requested_args == {"file_path": "long.py"}
 
 
 def test_usage_accumulates_from_api_not_estimate(config, registry, bus):
@@ -233,6 +271,69 @@ def test_successful_check_after_last_write_is_verified(
     assert result.verification[0].kind == "test"
     assert result.verification[0].command == "pytest -q"
     assert result.verification[0].step == 2
+
+
+def test_explicit_frontend_acceptance_blocks_backend_only_finish_then_recovers(
+    config, registry, bus, workspace: Path
+):
+    """Run2 回归：绿测试不能掩盖用户明确要求的页面交付缺失。"""
+    required: list[AcceptanceRequired] = []
+    bus.subscribe(
+        lambda event: required.append(event)
+        if isinstance(event, AcceptanceRequired)
+        else None
+    )
+    fake_verifier(registry, [True, True])
+    task = (
+        "运营反馈：活动优先级现在无法调整。希望达到的效果："
+        "活动列表和详情页可以查看、修改 Priority，且不能填写负数。"
+    )
+    agent, client = agent_with(
+        [
+            reply(
+                "先补服务逻辑",
+                [
+                    call(
+                        "write_file",
+                        {
+                            "path": "app/services/campaign_service.py",
+                            "content": "def update_priority(value): return value\n",
+                        },
+                    )
+                ],
+            ),
+            reply("先跑测试", [call("run_command", {"command": "pytest -q"})]),
+            reply("已经完成"),
+            reply(
+                "补齐详情页交付",
+                [
+                    call(
+                        "write_file",
+                        {
+                            "path": "app/web/templates/campaign_detail.html",
+                            "content": "<input name=\"priority\" type=\"number\" min=\"0\">\n",
+                        },
+                    )
+                ],
+            ),
+            reply("重新验证", [call("run_command", {"command": "pytest -q"})]),
+            reply("后端与页面均已完成并验证"),
+        ],
+        config,
+        registry,
+        bus,
+    )
+
+    result = agent.run(task)
+
+    assert result.reason is StopReason.DONE_VERIFIED
+    assert len(required) == 1
+    assert required[0].missing_items == ("覆盖用户明确要求的页面或交互",)
+    assert "页面或交互" in str(client.seen[3])
+    assert set(result.changed_paths) == {
+        "app/services/campaign_service.py",
+        "app/web/templates/campaign_detail.html",
+    }
 
 
 def test_build_artifact_does_not_invalidate_the_build_evidence(

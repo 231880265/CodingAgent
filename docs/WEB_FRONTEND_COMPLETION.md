@@ -21,6 +21,7 @@ src/components/AppHeader.vue             Workspace、连接与运行状态、移
 src/components/TaskComposer.vue          prompt、附件、Workspace、发送/停止 Run
 src/components/SessionSidebar.vue        常驻会话导航、新会话与历史切换
 src/components/RunTimeline.vue           事件配对、模型说明归并、当前或历史工程日志
+src/components/FileChangeGroup.vue       同一阶段按文件聚合读写、失败恢复与展开证据
 src/components/EventItem.vue             用户目标与内核关键转折
 src/components/ToolActivity.vue          调查、修改、命令与按需工具证据
 src/components/GoalResult.vue            Run 最终交付证据
@@ -64,3 +65,7 @@ src/services/mockGateway.ts              同契约确定性演示
 ### 修改轨迹归组与事实型实时进度（2026-08-30）
 
 连续 `edit_file` / `write_file` 现在折叠为“已修改 N 个文件”，创建、修改、失败状态及 Diff 仍可逐项展开；单次修改继续使用原有工具行，避免为一个动作制造额外容器。运行中底部状态不再固定显示“正在分析代码与现有证据”，而是回看已有事件，按真实路径、已修改文件数、测试/构建结果或模型刚刚公开的说明生成短句。当前端没有足够证据时只显示“正在理解任务并选择首批相关文件”，不会猜测根因。没有修改 Agent loop、Web 后端 DTO、ToolResult 或 Verified Finish。前端全量 `34 passed`，类型检查与生产构建通过。
+
+### 同一阶段按文件聚合（2026-09-01）
+
+时间线不再仅按事件类型合并。`read → edit → reread → edit` 会在同一阶段归为一张文件卡，摘要显示读取次数、修改次数、失败次数和是否重新检查；测试命令、关键阶段说明与最终结果会结束当前聚合，因此测试失败后再次修改同一路径仍是新卡。底层事件、参数、失败原因与 Diff 全部保留在展开区。早期失败后成功恢复显示黄色“已恢复”，阶段最后一次修改仍失败才显示红色；未修改文件继续归入“探索代码库”。该调整只修改 Vue Renderer，没有改变 SSE、后端协议、Agent 或 Verified Finish。专项 `RunTimeline` 测试 `11 passed`，前端全量 `40 passed`，类型检查与生产构建均通过。

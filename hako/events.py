@@ -56,6 +56,8 @@ class ToolCallStarted(Event):
     call_id: str
     name: str
     args: dict[str, Any]
+    # 仅当内核为重复的截断读取自动续页时非空；审计层仍能看到模型原始请求。
+    requested_args: dict[str, Any] = field(default_factory=dict)
     kind: str = field(init=False, default="tool_call_started")
 
 
@@ -78,6 +80,7 @@ class ToolCallFinished(Event):
     verification_command: str = ""
     command_status: str = ""
     exit_code: int | None = None
+    next_offset: int | None = None
     kind: str = field(init=False, default="tool_call_finished")
 
 
@@ -98,6 +101,23 @@ class VerificationRequired(Event):
     changed_paths: tuple[str, ...]
     message: str
     kind: str = field(init=False, default="verification_required")
+
+
+@dataclass(frozen=True)
+class AcceptancePlanned(Event):
+    """从用户原始目标中确定性提取出的最小交付面。"""
+
+    items: tuple[str, ...]
+    kind: str = field(init=False, default="acceptance_planned")
+
+
+@dataclass(frozen=True)
+class AcceptanceRequired(Event):
+    """模型试图结束，但真实变更还没有覆盖明确验收项。"""
+
+    missing_items: tuple[str, ...]
+    message: str
+    kind: str = field(init=False, default="acceptance_required")
 
 
 @dataclass(frozen=True)

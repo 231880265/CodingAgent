@@ -18,7 +18,7 @@ const isAgentNote = computed(() => props.event.type === "assistant_text");
 const isUserMessage = computed(() => props.event.type === "run_started");
 const variant = computed(() => {
   if (["agent_error", "worker_error"].includes(props.event.type)) return "error";
-  if (["verification_required", "continuation_required", "approval_required", "stream_gap"].includes(props.event.type)) return "warning";
+  if (["acceptance_required", "verification_required", "continuation_required", "approval_required", "stream_gap"].includes(props.event.type)) return "warning";
   if (props.event.type === "run_finished" && reason.value === "done_verified") return "success";
   return "neutral";
 });
@@ -31,6 +31,7 @@ const marker = computed(() => {
 const title = computed(() => {
   switch (props.event.type) {
     case "assistant_text": return "分析进展";
+    case "acceptance_required": return "交付面尚未覆盖，继续实现";
     case "verification_required": return "完成证据不足，继续验证";
     case "continuation_required": return "回答尚未形成行动，继续执行";
     case "approval_required": return "等待你的批准";
@@ -64,6 +65,15 @@ const body = computed(() => {
   if (props.event.type === "subagent_started") return stringValue(readPayload(props.event.payload, "task"));
   if (props.event.type === "verification_required") {
     return "最后一次文件修改后还没有成功验证；hako 不接受模型直接宣布完成。";
+  }
+  if (props.event.type === "acceptance_required") {
+    const items = readPayload(props.event.payload, "missingItems");
+    const labels = Array.isArray(items)
+      ? items.filter((item): item is string => typeof item === "string")
+      : [];
+    return labels.length
+      ? `用户明确要求的交付面尚未全部覆盖：${labels.join("；")}。`
+      : "用户明确要求的交付面尚未全部覆盖，hako 要求 Agent 继续实现。";
   }
   if (props.event.type === "continuation_required") {
     return "上一条回复没有产生工具行动，内核要求 Agent 继续执行。";

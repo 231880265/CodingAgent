@@ -56,6 +56,8 @@ def test_all_declared_events_have_explicit_mapping() -> None:
         ev.ToolCallStarted(call_id="c", name="read_file", args={}),
         ev.ToolCallFinished(call_id="c", name="read_file", ok=True, summary="s", detail="d", duration_ms=1),
         ev.ContextStats(used_tokens=1, limit=2, message_count=3),
+        ev.AcceptancePlanned(items=("页面交互", "验证")),
+        ev.AcceptanceRequired(missing_items=("页面交互",), message="m"),
         ev.VerificationRequired(changed_paths=("a.py",), message="m"),
         ev.ContinuationRequired(attempt=1, max_attempts=2, finish_reason="length", message="m"),
         ev.SubagentStarted(task="t", max_steps=2),
@@ -81,6 +83,7 @@ def test_tool_finished_payload_exposes_facts_for_web_presentation() -> None:
         verification_command="g++ qsort.cpp -o qsort.exe",
         command_status="succeeded",
         exit_code=0,
+        next_offset=200,
     )
 
     kind, payload = event_payload(event)
@@ -91,6 +94,22 @@ def test_tool_finished_payload_exposes_facts_for_web_presentation() -> None:
     assert payload["verificationCommand"] == "g++ qsort.cpp -o qsort.exe"
     assert payload["commandStatus"] == "succeeded"
     assert payload["exitCode"] == 0
+    assert payload["nextOffset"] == 200
+
+
+def test_tool_started_preserves_original_args_when_kernel_auto_continues() -> None:
+    event = ev.ToolCallStarted(
+        call_id="read-2",
+        name="read_file",
+        args={"path": "long.py", "offset": 200},
+        requested_args={"file_path": "long.py"},
+    )
+
+    kind, payload = event_payload(event)
+
+    assert kind == "tool_call_started"
+    assert payload["args"]["offset"] == 200
+    assert payload["requestedArgs"] == {"file_path": "long.py"}
 
 
 def test_writer_allocates_contiguous_session_sequence() -> None:

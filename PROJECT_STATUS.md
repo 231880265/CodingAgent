@@ -20,12 +20,13 @@
 | 2026-08-29 | Session/Run | 一 Session 多 Run 共享 Agent/Conversation；取消当前 Run 不关闭 Session、不回滚文件 |
 | 2026-08-30 | 历史恢复 | SUSPENDED 会话以同 sessionId、新 workerId 恢复语义 Conversation；旧工具观察不恢复 |
 | 2026-08-30 | Web 信息架构 | 普通对话、仓库分析、Verified Change 分别呈现；连续读取与修改分组，细节按需展开 |
-| 2026-08-30 | PromoOps 收束 | 演示只保留 Run1 线上发布 Bug 与 Run2 Priority/Conflict 产品迭代 |
+| 2026-08-30 | PromoOps 收束 | 演示只保留 Run1 线上发布 Bug 与 Run2 Priority 产品迭代 |
 | 2026-08-31 | 三层会话记忆 | RunMemory 硬事实由事件确定性生成；最近三轮自动携带，旧事实由 `search_session_history` 按需检索 |
 | 2026-08-31 | 问答入口收束 | 知识问答无需手动选择工作区；空值由后端解析为首个受控默认目录，初始等待文案不再虚构文件调查 |
 | 2026-08-31 | Run1 验证入口修复 | 通用 pytest 优先走仓库 `test.ps1`；项目测试脚本可登记为验证证据，修复 `27 passed` 却 `DONE_UNVERIFIED` 的误判 |
 | 2026-08-31 | 模型配置统一 | 新增 `HAKO_API_KEY + HAKO_BASE_URL + HAKO_MODEL` 通用入口；旧提供商 Key 保持兼容，Web 继续展示 Worker 实际上报的模型名 |
 | 2026-08-31 | Run2 Python 环境修复 | Windows bare Python 使用仓库或 `test.ps1` 明确声明的项目解释器；全量测试通过后不再鼓励额外猜测 venv 的内联冒烟 |
+| 2026-09-01 | 项目指令与展示收束 | 根目录 `AGENTS.md` 作为低于安全规则的项目级约束；Web 在同一阶段按文件聚合读写；Run2 收缩为详情页 Priority 编辑 |
 
 ## 当前核心机制
 
@@ -43,6 +44,7 @@
 - 每个 Run 结束后，从持久化事件确定性生成修改文件、验证命令/退出码、审批和失败；模型最终说明只作为非权威语义摘要。
 - Run 边界只保留最近三组 user/assistant 语义对和有界 Session 事实，不恢复旧 tool call、读取内容或 stdout/stderr；更早事实由只读 `search_session_history` 检索。
 - 当前没有实现运行中按 token 阈值自动摘要的通用 compaction；当前 Workspace 始终高于历史记忆，引用旧代码后必须重新读取。
+- Session 启动时可有界读取 Workspace 根目录 `AGENTS.md`，把稳定项目规范放在 system prompt 之后、用户目标之前；它不是普通工具观察，不能覆盖安全和权限边界。
 
 ### 执行、安全和完成
 
@@ -60,28 +62,28 @@
 
 最终模板口径：Run1 初态 `1 failed, 26 passed`；修复后进入 Run2 的起点为 `27 passed`；独立 Run1 held-out 为 `9 passed`。一次保留的真实 Web 轨迹为 14 次模型决策、27 次工具调用、4 次审批，只修改 `campaign_repository.py`，以 `DONE_VERIFIED` 结束。该轨迹证明链路可闭合，不代表任意任务成功率。
 
-### Run2：Priority 与同优先级冲突
+### Run2：详情页 Priority 自助编辑
 
-Run2 在 Run1 修改后的同一 Workspace、同一 Session 中继续。需求是允许非负 Priority；同范围多个活动只选择最高者；保存后若形成同范围同 Priority 冲突，必须立即指出冲突对象；发布冲突不得留下半完成状态；不同范围互不影响。交付覆盖领域逻辑、Service、API、页面和回归测试。
+Run2 在 Run1 修改后的同一 Workspace、同一 Session 中继续。需求是让运营在活动详情页修改 Priority，保存并刷新后仍保持新值；只接受非负整数，错误输入不能污染旧值；活动列表维持只读，既有发布行为不能回归。交付覆盖 Service、Repository、API、页面和回归测试。
 
-最终模板口径：Run2 完成基线 `36 passed`；独立 Run2 held-out 为 `6 passed`。演示主线是“一个真实线上 Bug + 一次真实产品迭代”。
+最终模板口径：Run2 完成基线 `32 passed`；独立 Run2 held-out 为 `4 passed`。演示主线是“一个真实线上 Bug + 一次边界清晰的产品迭代”。
 
 演示仓库、只读标准模板、reset runner 和 held-out tests 位于相邻的本地 `promoops-demo`，不进入 CodingAgent Git 仓库。每次从 `run1_initial` 重建 `work/`，保证可重复测试且不会把 Agent 的答案写回初始模板。
 
 ## 当前统一测试口径
 
-2026-08-31 当前工作树最近一次完整复测：
+2026-09-01 当前工作树最近一次完整复测：
 
 | 范围 | 结果 |
 |---|---|
-| Python Agent 核心 | `222 passed, 1 skipped` |
-| Spring Boot 控制面 | `21 passed` |
-| Vue/Vitest | `36 passed` |
+| Python Agent 核心 | `247 passed, 1 skipped` |
+| Spring Boot 控制面 | `25 passed` |
+| Vue/Vitest | `40 passed` |
 | 前端生产构建 | TypeScript 检查通过，`324 modules transformed` |
 | PromoOps Run1 初态 | `1 failed, 26 passed` |
 | PromoOps Run1 修复 / Run2 起点 | `27 passed` |
-| PromoOps Run2 完成态 | `36 passed` |
-| 外部 held-out | Run1 `9 passed`；Run2 `6 passed` |
+| PromoOps Run2 完成态 | `32 passed` |
+| 外部 held-out | Run1 `9 passed`；Run2 `4 passed` |
 
 这些测试集检查对象不同，不合并成一个夸大的“总通过数”。Fake Worker 只用于 UI 和协议回归，不能计入模型能力证据；真实模型单次演示也不能写成成功率。
 

@@ -125,7 +125,7 @@ def make_read_file(workspace: Path) -> Tool:
             raise ToolError(f"offset={offset} 超出文件范围（{path} 共 {total} 行）")
 
         window = lines[offset : offset + limit]
-        body, _ = clip_lines(
+        body, has_more = clip_lines(
             window, limit, start_line=offset + 1, total_lines=total, path=path
         )
         shown = len(window)
@@ -135,6 +135,7 @@ def make_read_file(workspace: Path) -> Tool:
             summary=f"{rel(workspace, target)} 第 {offset + 1}-{offset + shown} 行 / 共 {total} 行",
             # 声明"我读的是这个文件"，用规范化路径，好让写操作之后能匹配上。
             subject_path=rel(workspace, target),
+            next_offset=(offset + shown if has_more else None),
         )
 
     return Tool(

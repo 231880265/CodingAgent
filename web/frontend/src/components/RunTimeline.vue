@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { Skeleton } from "vant";
 import type { HakoEvent } from "../types/api";
 import {
@@ -11,7 +11,7 @@ import {
 import { deriveRunPresentation } from "../utils/runPresentation";
 import EventItem from "./EventItem.vue";
 import GoalResult from "./GoalResult.vue";
-import ChangeActivityGroup from "./ChangeActivityGroup.vue";
+import FileChangeGroup from "./FileChangeGroup.vue";
 import ReadActivityGroup from "./ReadActivityGroup.vue";
 import ToolActivity from "./ToolActivity.vue";
 
@@ -31,9 +31,14 @@ type TimelineEntry =
 type RawActivityEntry = Exclude<TimelineEntry, { kind: "goal" } | { kind: "result" }>;
 type ToolEntry = Extract<TimelineEntry, { kind: "tool" }>;
 type ReadGroupEntry =
-  | { kind: "read-group"; key: string; runId: string; activities: ToolEntry[] }
-  | { kind: "workspace-group"; key: string; runId: string; activities: ToolEntry[] }
-  | { kind: "change-group"; key: string; runId: string; activities: ToolEntry[] };
+  | { kind: "exploration-group"; key: string; runId: string; activities: ToolEntry[] }
+  | {
+      kind: "file-change-group";
+      key: string;
+      runId: string;
+      path: string;
+      activities: ToolEntry[];
+    };
 type ActivityEntry = RawActivityEntry | ReadGroupEntry;
 
 interface RunGroup {
@@ -53,12 +58,16 @@ interface ActiveProgress {
 const props = defineProps<{ events: HakoEvent[]; active: boolean }>();
 const scrollArea = ref<HTMLElement | null>(null);
 const followTail = ref(true);
+const AUTO_SCROLL_THROTTLE_MS = 80;
+const BOTTOM_TOLERANCE_PX = 96;
+let autoScrollTimer: ReturnType<typeof setTimeout> | null = null;
 const hiddenTypes = new Set([
   "turn_started",
   "context_stats",
   "session_status",
   "run_status",
   "worker_exited",
+  "acceptance_planned",
   "approval_required",
   "approval_resolved",
   "run_finished",
@@ -289,19 +298,42 @@ const activeProgress = computed<ActiveProgress | null>(() => {
 
 watch(
   () => props.events.length,
-  async () => {
-    if (!followTail.value) return;
-    await nextTick();
-    const element = scrollArea.value;
-    if (element) element.scrollTop = element.scrollHeight;
-  },
+  () => scheduleAutoScroll(),
+  { flush: "post", immediate: true },
 );
 
 function handleScroll(): void {
   const element = scrollArea.value;
   if (!element) return;
-  followTail.value = element.scrollHeight - element.scrollTop - element.clientHeight < 80;
+  followTail.value = distanceFromBottom(element) <= BOTTOM_TOLERANCE_PX;
 }
+
+function handleWheel(event: WheelEvent): void {
+  // 在浏览器完成滚动布局前先记录用户向上浏览的意图，防止已排队的自动滚动抢回底部。
+  if (event.deltaY < 0) followTail.value = false;
+}
+
+function scheduleAutoScroll(): void {
+  if (!followTail.value || autoScrollTimer) return;
+  autoScrollTimer = setTimeout(() => {
+    autoScrollTimer = null;
+    if (!followTail.value) return;
+    void nextTick().then(() => {
+      const element = scrollArea.value;
+      if (!element || !followTail.value) return;
+      element.scrollTop = element.scrollHeight;
+    });
+  }, AUTO_SCROLL_THROTTLE_MS);
+}
+
+function distanceFromBottom(element: HTMLElement): number {
+  return Math.max(0, element.scrollHeight - element.scrollTop - element.clientHeight);
+}
+
+onBeforeUnmount(() => {
+  if (autoScrollTimer) clearTimeout(autoScrollTimer);
+  autoScrollTimer = null;
+});
 
 function numberValue(value: unknown): number | null {
   return typeof value === "number" ? value : null;
@@ -411,9 +443,8 @@ function summarizeAssistantText(value: string): string {
 
 function entryTime(entry: ActivityEntry): string {
   if (
-    entry.kind === "read-group"
-    || entry.kind === "workspace-group"
-    || entry.kind === "change-group"
+    entry.kind === "exploration-group"
+    || entry.kind === "file-change-group"
   ) {
     const last = entry.activities.at(-1);
     return last ? entryTime(last) : "";
@@ -426,43 +457,85 @@ function entryTime(entry: ActivityEntry): string {
 
 function collapseToolActivities(activities: ActivityEntry[]): ActivityEntry[] {
   const collapsed: ActivityEntry[] = [];
-  let pending: ToolEntry[] = [];
-  let pendingTool = "";
+  let stage: ToolEntry[] = [];
 
-  const flushPending = (): void => {
-    const first = pending[0];
+  const flushStage = (): void => {
+    const first = stage[0];
     if (!first) return;
-    if (pending.length === 1) {
-      collapsed.push(first);
-    } else {
-      collapsed.push({
-        kind: pendingTool === "list_dir"
-          ? "workspace-group"
-          : pendingTool === "change"
-            ? "change-group"
-            : "read-group",
-        key: `${pendingTool}-group-${first.key}-${pending.at(-1)?.key}`,
-        runId: first.runId,
-        activities: pending,
+
+    const buckets = new Map<string, {
+      path: string;
+      firstIndex: number;
+      activities: ToolEntry[];
+      changed: boolean;
+    }>();
+    stage.forEach((activity, index) => {
+      const path = toolPath(activity) || `调用 ${index + 1}`;
+      const key = normalizePath(path) || `__unknown-${index}`;
+      const bucket = buckets.get(key) ?? {
+        path,
+        firstIndex: index,
+        activities: [],
+        changed: false,
+      };
+      bucket.activities.push(activity);
+      bucket.changed ||= ["edit_file", "write_file"].includes(toolName(activity));
+      buckets.set(key, bucket);
+    });
+
+    const output: Array<{
+      firstIndex: number;
+      entry: ReadGroupEntry;
+    }> = [];
+    const exploration: Array<{ index: number; activity: ToolEntry }> = [];
+    for (const bucket of buckets.values()) {
+      if (bucket.changed) {
+        output.push({
+          firstIndex: bucket.firstIndex,
+          entry: {
+            kind: "file-change-group",
+            key: `file-change-${normalizePath(bucket.path)}-${bucket.activities[0]?.key}-${bucket.activities.at(-1)?.key}`,
+            runId: first.runId,
+            path: bucket.path,
+            activities: bucket.activities,
+          },
+        });
+      } else {
+        for (const activity of bucket.activities) {
+          exploration.push({ index: stage.indexOf(activity), activity });
+        }
+      }
+    }
+    if (exploration.length) {
+      exploration.sort((left, right) => left.index - right.index);
+      output.push({
+        firstIndex: exploration[0]!.index,
+        entry: {
+          kind: "exploration-group",
+          key: `exploration-group-${exploration[0]!.activity.key}-${exploration.at(-1)?.activity.key}`,
+          runId: first.runId,
+          activities: exploration.map((item) => item.activity),
+        },
       });
     }
-    pending = [];
-    pendingTool = "";
+    output.sort((left, right) => left.firstIndex - right.firstIndex);
+    collapsed.push(...output.map((item) => item.entry));
+    stage = [];
   };
 
   for (const activity of activities) {
     const name = activity.kind === "tool" ? toolName(activity) : "";
-    const groupTool = ["edit_file", "write_file"].includes(name) ? "change" : name;
-    if (["read_file", "list_dir", "change"].includes(groupTool)) {
-      if (pendingTool && pendingTool !== groupTool) flushPending();
-      pendingTool = groupTool;
-      pending.push(activity as ToolEntry);
+    if (["read_file", "list_dir", "edit_file", "write_file"].includes(name)) {
+      if (stage.length && beginsNewFileStage(activity as ToolEntry)) flushStage();
+      stage.push(activity as ToolEntry);
       continue;
     }
-    flushPending();
+    // 命令、审批、错误和其他非文件事件都是阶段边界。同一路径在边界后
+    // 再次返修会生成新卡，避免把“初次实现”和“测试后修复”混为一谈。
+    flushStage();
     collapsed.push(activity);
   }
-  flushPending();
+  flushStage();
   return collapsed;
 }
 
@@ -470,10 +543,42 @@ function toolName(activity: ToolEntry): string {
   const payload = activity.started?.payload ?? activity.finished?.payload;
   return stringValue(readPayload(payload, "name"));
 }
+
+function toolPath(activity: ToolEntry): string {
+  const args = readPayload(activity.started?.payload, "args");
+  const requested = readStringArgument(args, "path", "file_path", "file", "filePath");
+  if (requested) return requested;
+  for (const key of ["modifiedPaths", "createdPaths", "deletedPaths", "touchedPaths"]) {
+    const candidate = stringList(readPayload(activity.finished?.payload, key))[0];
+    if (candidate) return candidate;
+  }
+  return "";
+}
+
+function normalizePath(value: string): string {
+  return value
+    .replaceAll("\\", "/")
+    .replace(/\/{2,}/g, "/")
+    .replace(/^\.\//, "")
+    .replace(/\/+$/, "")
+    .toLowerCase();
+}
+
+function beginsNewFileStage(activity: ToolEntry): boolean {
+  const note = activity.notes
+    .map((event) => stringValue(readPayload(event.payload, "text")))
+    .join(" ");
+  return /(?:接下来|下一步|现在(?:运行|验证|测试)|开始(?:验证|测试)|重新(?:检查|验证)|根据.{0,16}(?:失败|结果))/u.test(note);
+}
 </script>
 
 <template>
-  <div ref="scrollArea" class="timeline-scroll" @scroll="handleScroll">
+  <div
+    ref="scrollArea"
+    class="timeline-scroll"
+    @scroll.passive="handleScroll"
+    @wheel.passive="handleWheel"
+  >
     <div v-if="events.length" class="timeline-list" aria-live="polite">
       <section
         v-for="group in groups"
@@ -532,12 +637,13 @@ function toolName(activity: ToolEntry): string {
             <div v-if="group.activities.length" class="assistant-activity-stream" aria-label="内部执行过程">
               <template v-for="entry in group.activities" :key="entry.key">
                 <ReadActivityGroup
-                  v-if="entry.kind === 'read-group' || entry.kind === 'workspace-group'"
+                  v-if="entry.kind === 'exploration-group'"
                   :activities="entry.activities"
-                  :kind="entry.kind === 'workspace-group' ? 'workspace' : 'read'"
+                  kind="exploration"
                 />
-                <ChangeActivityGroup
-                  v-else-if="entry.kind === 'change-group'"
+                <FileChangeGroup
+                  v-else-if="entry.kind === 'file-change-group'"
+                  :path="entry.path"
                   :activities="entry.activities"
                 />
                 <ToolActivity

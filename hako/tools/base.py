@@ -50,6 +50,9 @@ class ToolResult:
     # 中用正则猜 exit=0，避免展示文本变化后破坏证据链。
     command_status: str = ""
     exit_code: int | None = None
+    # read_file 若只返回了文件的一部分，用结构化游标告诉主循环下一页从哪里开始。
+    # 文本中的提示仍保留给模型和人看；该字段让内核不必解析自然语言。
+    next_offset: int | None = None
     # 工具内部若调用了模型（例如只读 subagent），把真实 usage 交回主循环。
     # 否则总 token 只统计主模型，会让 A/B 成本比较失真。
     prompt_tokens: int = 0

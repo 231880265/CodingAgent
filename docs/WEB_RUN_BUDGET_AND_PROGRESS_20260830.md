@@ -22,7 +22,7 @@ PromoOps Run2 并非 Worker 崩溃：它在第 40 次模型决策后刚完成 `c
 
 ## 对 PromoOps 现场的处理
 
-本次没有直接修改 `promoops-demo/work`，因此 Run2 的失败轨迹和 10 个已落盘文件仍可用于对照。重启新版 hako Web 后，应在原 Session 中继续发送：“继续完成刚才未完成的 Priority/Conflict 功能，先根据当前失败测试修复，再运行完整测试并确认页面行为。”新 Run 会复用重建后的 Conversation，并使用新的 Web 安全预算。
+本次没有直接修改 `promoops-demo/work`，因此当时 Run2 的失败轨迹和 10 个已落盘文件仍可用于复盘。该版综合 `Priority/Conflict` 场景已于 2026-09-01 被更聚焦的“活动详情页 Priority 自助编辑”Run2 取代，本节旧续跑提示仅是历史记录，不再用于当前演示或评测。当前口径以 `promoops-demo/issues/run2.md`、`README.md` 与 `PROJECT_STATUS.md` 为准。
 
 ## 回退范围
 

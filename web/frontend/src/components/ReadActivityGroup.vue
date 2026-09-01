@@ -5,7 +5,7 @@ import { formatTime, readPayload, readStringArgument } from "../utils/presentati
 
 const props = withDefaults(defineProps<{
   activities: ToolActivityPair[];
-  kind?: "read" | "workspace";
+  kind?: "read" | "workspace" | "exploration";
 }>(), {
   kind: "read",
 });
@@ -13,6 +13,10 @@ const props = withDefaults(defineProps<{
 const rows = computed(() => props.activities.map((activity, index) => {
   const args = readPayload(activity.started?.payload, "args");
   const finished = activity.finished;
+  const name = stringValue(readPayload(
+    activity.started?.payload ?? activity.finished?.payload,
+    "name",
+  ));
   const touched = stringList(readPayload(finished?.payload, "touchedPaths"));
   const path = readStringArgument(args, "path", "file_path") || touched[0] || `文件 ${index + 1}`;
   const ok = readPayload(finished?.payload, "ok") === true;
@@ -24,12 +28,14 @@ const rows = computed(() => props.activities.map((activity, index) => {
     .join("\n\n");
   return {
     key: activity.key,
+    name,
     args,
     detail,
     note,
     path,
     ok,
     pending: finished == null,
+    durationMs: typeof durationMs === "number" ? durationMs : 0,
     duration: typeof durationMs === "number" ? `${durationMs} ms` : "",
     occurredAt: finished?.occurredAt ?? activity.started?.occurredAt ?? "",
   };
@@ -37,10 +43,35 @@ const rows = computed(() => props.activities.map((activity, index) => {
 
 const failedCount = computed(() => rows.value.filter((row) => !row.pending && !row.ok).length);
 const pendingCount = computed(() => rows.value.filter((row) => row.pending).length);
+const readCount = computed(() => rows.value.filter((row) => row.name === "read_file").length);
+const workspaceCount = computed(() => rows.value.filter((row) => row.name === "list_dir").length);
 const latestTime = computed(() => rows.value.at(-1)?.occurredAt ?? "");
-const variant = computed(() => failedCount.value ? "error" : "neutral");
-const marker = computed(() => failedCount.value ? "×" : "›");
+const firstTime = computed(() => rows.value[0]?.occurredAt ?? "");
+const elapsed = computed(() => formatElapsed(groupElapsedMs(rows.value)));
+const timeTitle = computed(() => {
+  if (!firstTime.value) return "";
+  const start = formatTime(firstTime.value);
+  const end = latestTime.value ? formatTime(latestTime.value) : start;
+  return start === end ? start : `${start}–${end}`;
+});
+const variant = computed(() => {
+  if (!failedCount.value) return "neutral";
+  return props.kind === "exploration" ? "warning" : "error";
+});
+const marker = computed(() => {
+  if (!failedCount.value) return "›";
+  return props.kind === "exploration" ? "!" : "×";
+});
 const title = computed(() => {
+  if (props.kind === "exploration") {
+    if (pendingCount.value) return "正在探索代码库";
+    const facts = [
+      workspaceCount.value ? `检查 ${workspaceCount.value} 个位置` : "",
+      readCount.value ? `读取 ${readCount.value} 个相关文件` : "",
+    ].filter(Boolean).join(" · ");
+    if (failedCount.value) return `探索代码库 · ${facts || `${rows.value.length} 次调用`} · ${failedCount.value} 个失败`;
+    return facts ? `探索代码库 · ${facts}` : "探索代码库";
+  }
   const subject = props.kind === "workspace" ? "个位置" : "个文件";
   const action = props.kind === "workspace" ? "查看" : "读取";
   if (pendingCount.value) return `正在${action} ${rows.value.length} ${subject}`;
@@ -48,11 +79,33 @@ const title = computed(() => {
   return `已${action} ${rows.value.length} ${subject}`;
 });
 const detailLabel = computed(() =>
-  props.kind === "workspace" ? "查看路径与工具详情" : "查看读取文件",
+  props.kind === "exploration"
+    ? "查看文件与工具调用"
+    : props.kind === "workspace"
+      ? "查看路径与工具详情"
+      : "查看读取文件",
 );
-const stateLabels = computed(() => props.kind === "workspace"
-  ? { pending: "查看中", success: "已查看" }
-  : { pending: "读取中", success: "已读取" });
+
+function rowState(row: { name: string; pending: boolean; ok: boolean }): string {
+  const action = row.name === "list_dir" ? "查看" : "读取";
+  if (row.pending) return `${action}中`;
+  return row.ok ? `已${action}` : "失败";
+}
+
+function groupElapsedMs(values: Array<{ occurredAt: string; durationMs: number }>): number {
+  if (!values.length) return 0;
+  const start = Date.parse(values[0]!.occurredAt);
+  const end = Date.parse(values.at(-1)?.occurredAt ?? "");
+  if (Number.isFinite(start) && Number.isFinite(end) && end > start) return end - start;
+  return values.reduce((total, row) => total + row.durationMs, 0);
+}
+
+function formatElapsed(value: number): string {
+  if (value <= 0) return "";
+  if (value < 1000) return "<1s";
+  if (value < 60_000) return `${Math.max(1, Math.round(value / 1000))}s`;
+  return `${Math.floor(value / 60_000)}m ${Math.round((value % 60_000) / 1000)}s`;
+}
 
 function stringList(value: unknown): string[] {
   return Array.isArray(value)
@@ -70,6 +123,7 @@ function stringValue(value: unknown): string {
     class="timeline-event tool-activity read-activity-group"
     :class="{
       'workspace-activity-group': kind === 'workspace',
+      'exploration-activity-group': kind === 'exploration',
       'is-pending': pendingCount > 0,
     }"
     :data-variant="variant"
@@ -80,7 +134,9 @@ function stringValue(value: unknown): string {
         <div class="event-title-row">
           <strong>{{ title }}<span v-if="pendingCount" class="progress-dots" aria-hidden="true">...</span></strong>
         </div>
-        <time v-if="latestTime" class="event-meta" :datetime="latestTime">{{ formatTime(latestTime) }}</time>
+        <span v-if="pendingCount || elapsed" class="event-meta" :title="timeTitle">
+          {{ pendingCount ? "进行中" : elapsed }}
+        </span>
       </header>
 
       <details class="event-detail read-group-detail">
@@ -91,11 +147,12 @@ function stringValue(value: unknown): string {
               <summary>
                 <code>{{ row.path }}</code>
                 <span :data-state="row.pending ? 'pending' : row.ok ? 'success' : 'error'">
-                  {{ row.pending ? stateLabels.pending : row.ok ? stateLabels.success : "失败" }}
+                  {{ rowState(row) }}
                 </span>
               </summary>
               <div class="read-file-detail">
                 <p v-if="row.note" class="agent-note-copy">{{ row.note }}</p>
+                <small v-if="row.occurredAt">时间 {{ formatTime(row.occurredAt) }}</small>
                 <small v-if="row.duration">耗时 {{ row.duration }}</small>
                 <div v-if="row.args" class="detail-block">
                   <span>工具参数</span>

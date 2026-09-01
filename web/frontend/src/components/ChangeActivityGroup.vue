@@ -30,6 +30,7 @@ const rows = computed(() => props.activities.map((activity, index) => {
       .map((event) => stringValue(readPayload(event.payload, "text")))
       .filter(Boolean)
       .join("\n\n"),
+    durationMs: typeof durationMs === "number" ? durationMs : 0,
     duration: typeof durationMs === "number" ? `${durationMs} ms` : "",
     occurredAt: finished?.occurredAt ?? activity.started?.occurredAt ?? "",
     oldText: readStringArgument(args, "old_text", "old_string"),
@@ -42,6 +43,14 @@ const failedCount = computed(() => rows.value.filter((row) => !row.pending && !r
 const pendingCount = computed(() => rows.value.filter((row) => row.pending).length);
 const uniquePathCount = computed(() => new Set(rows.value.map((row) => row.path)).size);
 const latestTime = computed(() => rows.value.at(-1)?.occurredAt ?? "");
+const firstTime = computed(() => rows.value[0]?.occurredAt ?? "");
+const elapsed = computed(() => formatElapsed(groupElapsedMs(rows.value)));
+const timeTitle = computed(() => {
+  if (!firstTime.value) return "";
+  const start = formatTime(firstTime.value);
+  const end = latestTime.value ? formatTime(latestTime.value) : start;
+  return start === end ? start : `${start}–${end}`;
+});
 const variant = computed(() => failedCount.value ? "error" : "neutral");
 const marker = computed(() => failedCount.value ? "×" : "›");
 const title = computed(() => {
@@ -50,6 +59,21 @@ const title = computed(() => {
   if (uniquePathCount.value === rows.value.length) return `已修改 ${uniquePathCount.value} 个文件`;
   return `已完成 ${rows.value.length} 次修改，涉及 ${uniquePathCount.value} 个文件`;
 });
+
+function groupElapsedMs(values: Array<{ occurredAt: string; durationMs: number }>): number {
+  if (!values.length) return 0;
+  const start = Date.parse(values[0]!.occurredAt);
+  const end = Date.parse(values.at(-1)?.occurredAt ?? "");
+  if (Number.isFinite(start) && Number.isFinite(end) && end > start) return end - start;
+  return values.reduce((total, row) => total + row.durationMs, 0);
+}
+
+function formatElapsed(value: number): string {
+  if (value <= 0) return "";
+  if (value < 1000) return "<1s";
+  if (value < 60_000) return `${Math.max(1, Math.round(value / 1000))}s`;
+  return `${Math.floor(value / 60_000)}m ${Math.round((value % 60_000) / 1000)}s`;
+}
 
 function stringList(value: unknown): string[] {
   return Array.isArray(value)
@@ -74,7 +98,9 @@ function stringValue(value: unknown): string {
         <div class="event-title-row">
           <strong>{{ title }}<span v-if="pendingCount" class="progress-dots" aria-hidden="true">...</span></strong>
         </div>
-        <time v-if="latestTime" class="event-meta" :datetime="latestTime">{{ formatTime(latestTime) }}</time>
+        <span v-if="pendingCount || elapsed" class="event-meta" :title="timeTitle">
+          {{ pendingCount ? "进行中" : elapsed }}
+        </span>
       </header>
 
       <details class="event-detail read-group-detail">
@@ -90,6 +116,7 @@ function stringValue(value: unknown): string {
               </summary>
               <div class="read-file-detail">
                 <p v-if="row.note" class="agent-note-copy">{{ row.note }}</p>
+                <small v-if="row.occurredAt">时间 {{ formatTime(row.occurredAt) }}</small>
                 <small v-if="row.duration">耗时 {{ row.duration }}</small>
                 <div v-if="row.oldText" class="detail-block code-diff-before">
                   <span>修改前</span>

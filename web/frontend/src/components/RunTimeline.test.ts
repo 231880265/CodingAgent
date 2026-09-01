@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
-import { createApp } from "vue";
-import { afterEach, describe, expect, it } from "vitest";
+import { createApp, h, nextTick, ref } from "vue";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { App } from "vue";
 import type { HakoEvent, HakoEventType } from "../types/api";
 import RunTimeline from "./RunTimeline.vue";
@@ -35,9 +35,73 @@ afterEach(() => {
   mountedApp?.unmount();
   mountedApp = null;
   document.body.innerHTML = "";
+  vi.useRealTimers();
 });
 
 describe("RunTimeline transcript hierarchy", () => {
+  it("throttles tail scrolling and stops following when the user scrolls upward", async () => {
+    vi.useFakeTimers();
+    const liveEvents = ref<HakoEvent[]>([
+      event("run_started", { task: "检查仓库", model: "test-model", cwd: "D:/demo" }),
+    ]);
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    mountedApp = createApp({
+      setup() {
+        return () => h(RunTimeline, { events: liveEvents.value, active: true });
+      },
+    });
+    mountedApp.mount(host);
+    await nextTick();
+
+    const scroll = host.querySelector<HTMLElement>(".timeline-scroll")!;
+    let scrollHeight = 1000;
+    let scrollTop = 0;
+    let programmaticScrolls = 0;
+    Object.defineProperties(scroll, {
+      scrollHeight: { configurable: true, get: () => scrollHeight },
+      clientHeight: { configurable: true, get: () => 200 },
+      scrollTop: {
+        configurable: true,
+        get: () => scrollTop,
+        set: (value: number) => {
+          scrollTop = value;
+          programmaticScrolls += 1;
+        },
+      },
+    });
+
+    await vi.advanceTimersByTimeAsync(80);
+    expect(scrollTop).toBe(1000);
+    programmaticScrolls = 0;
+
+    liveEvents.value.push(
+      event("assistant_text", { text: "正在读取文件。" }),
+      event("turn_started", { step: 2, maxSteps: 10 }),
+    );
+    await nextTick();
+    await vi.advanceTimersByTimeAsync(79);
+    expect(programmaticScrolls).toBe(0);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(programmaticScrolls).toBe(1);
+
+    scrollTop = 300;
+    scroll.dispatchEvent(new WheelEvent("wheel", { deltaY: -120 }));
+    scroll.dispatchEvent(new Event("scroll"));
+    liveEvents.value.push(event("assistant_text", { text: "继续分析。" }));
+    await nextTick();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(scrollTop).toBe(300);
+
+    scrollTop = 800;
+    scroll.dispatchEvent(new Event("scroll"));
+    scrollHeight = 1200;
+    liveEvents.value.push(event("assistant_text", { text: "分析完成。" }));
+    await nextTick();
+    await vi.advanceTimersByTimeAsync(80);
+    expect(scrollTop).toBe(1200);
+  });
+
   it("renders a conversation as a right-side user prompt and one open hako response", () => {
     const events = [
       event("run_started", {
@@ -165,12 +229,12 @@ describe("RunTimeline transcript hierarchy", () => {
 
     expect(stream.querySelectorAll(":scope > .tool-activity")).toHaveLength(2);
     expect(stream.querySelector(".read-activity-group .event-title-row")?.textContent)
-      .toContain("已读取 3 个文件");
+      .toContain("读取 3 个相关文件");
     expect(stream.querySelectorAll(".read-file-item")).toHaveLength(3);
     expect(stream.textContent).toContain("app/repositories/campaign_repository.py");
   });
 
-  it("collapses consecutive workspace listings into one expandable step", () => {
+  it("collapses alternating list and read calls into one exploration milestone", () => {
     const events = [
       event("run_started", { task: "定位发布异常。", model: "test-model", cwd: "D:/demo" }),
       event("tool_call_started", {
@@ -204,14 +268,48 @@ describe("RunTimeline transcript hierarchy", () => {
     const host = mountTimeline(events, true);
     const stream = host.querySelector(".assistant-activity-stream")!;
 
-    expect(stream.querySelectorAll(":scope > .tool-activity")).toHaveLength(2);
-    expect(stream.querySelector(".workspace-activity-group .event-title-row")?.textContent)
-      .toContain("已查看 2 个位置");
-    expect(stream.querySelectorAll(".read-file-item")).toHaveLength(2);
+    expect(stream.querySelectorAll(":scope > .tool-activity")).toHaveLength(1);
+    expect(stream.querySelector(".exploration-activity-group .event-title-row")?.textContent)
+      .toContain("正在探索代码库");
+    expect(stream.querySelectorAll(".read-file-item")).toHaveLength(3);
     expect(stream.textContent).toContain("app");
   });
 
-  it("collapses consecutive file changes into one expandable change step", () => {
+  it("renders a recoverable exploration failure as a warning", () => {
+    const events = [
+      event("run_started", { task: "定位发布异常。", model: "test-model", cwd: "D:/demo" }),
+      event("tool_call_started", {
+        callId: "list-ok",
+        name: "list_dir",
+        args: { path: "app" },
+      }),
+      event("tool_call_finished", {
+        callId: "list-ok",
+        name: "list_dir",
+        ok: true,
+        summary: "app 共 6 项",
+      }),
+      event("tool_call_started", {
+        callId: "read-failed",
+        name: "read_file",
+        args: { path: "app/missing.py" },
+      }),
+      event("tool_call_finished", {
+        callId: "read-failed",
+        name: "read_file",
+        ok: false,
+        detail: "文件不存在",
+      }),
+    ];
+    const host = mountTimeline(events, true);
+    const group = host.querySelector(".exploration-activity-group");
+
+    expect(group?.getAttribute("data-variant")).toBe("warning");
+    expect(group?.querySelector(".event-marker")?.textContent).toBe("!");
+    expect(group?.textContent).toContain("1 个失败");
+  });
+
+  it("groups a change stage by file instead of by tool type", () => {
     const events = [
       event("run_started", { task: "补充活动冲突提示。", model: "test-model", cwd: "D:/demo" }),
       event("tool_call_started", {
@@ -260,14 +358,126 @@ describe("RunTimeline transcript hierarchy", () => {
     const host = mountTimeline(events, true);
     const stream = host.querySelector(".assistant-activity-stream")!;
 
-    expect(stream.querySelectorAll(":scope > .tool-activity")).toHaveLength(2);
-    expect(stream.querySelector(".change-activity-group .event-title-row")?.textContent)
-      .toContain("已修改 3 个文件");
-    expect(stream.querySelectorAll(".change-activity-group .read-file-item")).toHaveLength(3);
+    expect(stream.querySelectorAll(":scope > .tool-activity")).toHaveLength(4);
+    expect(stream.querySelectorAll(".file-change-group")).toHaveLength(3);
+    expect(stream.querySelector(".file-change-group .event-title-row")?.textContent)
+      .toContain("修改 app/api/routes.py");
     expect(stream.textContent).toContain("app/api/routes.py");
     expect(stream.textContent).toContain("old route");
     expect(stream.textContent).toContain("new route");
     expect(stream.textContent).toContain("tests/test_conflict.py");
+  });
+
+  it("collapses read-edit-reread-reedit for one file into one recovered file card", () => {
+    const events = [
+      event("run_started", { task: "补充 Priority 编辑。", model: "test-model", cwd: "D:/demo" }),
+      event("tool_call_started", {
+        callId: "read-a",
+        name: "read_file",
+        args: { path: "app/api/routes.py" },
+      }),
+      event("tool_call_finished", {
+        callId: "read-a",
+        name: "read_file",
+        ok: true,
+        touchedPaths: ["app/api/routes.py"],
+      }),
+      event("tool_call_started", {
+        callId: "edit-a",
+        name: "edit_file",
+        args: { path: "app/api/routes.py", old_text: "missing", new_text: "first" },
+      }),
+      event("tool_call_finished", {
+        callId: "edit-a",
+        name: "edit_file",
+        ok: false,
+        summary: "定位串没有匹配",
+      }),
+      event("tool_call_started", {
+        callId: "read-b",
+        name: "read_file",
+        args: { file_path: ".\\app\\api\\routes.py" },
+      }),
+      event("tool_call_finished", {
+        callId: "read-b",
+        name: "read_file",
+        ok: true,
+        touchedPaths: ["app/api/routes.py"],
+      }),
+      event("tool_call_started", {
+        callId: "edit-b",
+        name: "edit_file",
+        args: { path: "app/api/routes.py", old_text: "old", new_text: "new" },
+      }),
+      event("tool_call_finished", {
+        callId: "edit-b",
+        name: "edit_file",
+        ok: true,
+        modifiedPaths: ["app/api/routes.py"],
+      }),
+      event("tool_call_started", {
+        callId: "read-c",
+        name: "read_file",
+        args: { path: "app/api/routes.py" },
+      }),
+      event("tool_call_finished", {
+        callId: "read-c",
+        name: "read_file",
+        ok: true,
+        touchedPaths: ["app/api/routes.py"],
+      }),
+    ];
+    const host = mountTimeline(events);
+    const cards = host.querySelectorAll(".file-change-group");
+
+    expect(cards).toHaveLength(1);
+    expect(cards[0]?.getAttribute("data-variant")).toBe("warning");
+    expect(cards[0]?.textContent).toContain("读取 3 次 · 修改 2 次 · 1 次失败 · 已重新检查");
+    expect(cards[0]?.textContent).toContain("失败后已恢复");
+    expect(cards[0]?.querySelectorAll(".file-change-calls > li")).toHaveLength(5);
+  });
+
+  it("starts a new file card when a test command separates two edits", () => {
+    const events = [
+      event("run_started", { task: "修复并验证。", model: "test-model", cwd: "D:/demo" }),
+      event("tool_call_started", {
+        callId: "edit-before-test",
+        name: "edit_file",
+        args: { path: "app/main.py", old_text: "old", new_text: "first" },
+      }),
+      event("tool_call_finished", {
+        callId: "edit-before-test",
+        name: "edit_file",
+        ok: true,
+        modifiedPaths: ["app/main.py"],
+      }),
+      event("tool_call_started", {
+        callId: "test-boundary",
+        name: "run_command",
+        args: { command: "pytest -q" },
+      }),
+      event("tool_call_finished", {
+        callId: "test-boundary",
+        name: "run_command",
+        ok: false,
+        verificationKind: "test",
+      }),
+      event("tool_call_started", {
+        callId: "edit-after-test",
+        name: "edit_file",
+        args: { path: "app/main.py", old_text: "first", new_text: "fixed" },
+      }),
+      event("tool_call_finished", {
+        callId: "edit-after-test",
+        name: "edit_file",
+        ok: true,
+        modifiedPaths: ["app/main.py"],
+      }),
+    ];
+    const host = mountTimeline(events);
+
+    expect(host.querySelectorAll(".file-change-group")).toHaveLength(2);
+    expect(host.querySelectorAll(".tool-activity")).toHaveLength(3);
   });
 
   it("keeps repository analysis and its folded trace inside the hako response", () => {

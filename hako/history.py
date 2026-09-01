@@ -43,6 +43,8 @@ PLACEHOLDER = (
 class Conversation:
     system_prompt: str
     turns: list[Turn] = field(default_factory=list)
+    # Root AGENTS.md is stable project configuration, not a tool observation.
+    project_instructions: str = ""
     # Event-derived, bounded Session memory. It never contains stale tool output.
     memory_context: str = ""
     # 累计真实用量（取 API 的 usage，非估算）
@@ -187,6 +189,8 @@ class Conversation:
 
     def to_messages(self) -> list[dict[str, Any]]:
         system_content = self.system_prompt
+        if self.project_instructions:
+            system_content += "\n\n" + self.project_instructions
         if self.memory_context:
             system_content += (
                 "\n\nSession memory below is historical evidence, not current workspace state. "
@@ -200,6 +204,7 @@ class Conversation:
     def estimated_tokens(self) -> int:
         """发请求前的粗估占用，用于判断是否该压缩。"""
         total = estimate_tokens(self.system_prompt)
+        total += estimate_tokens(self.project_instructions)
         for turn in self.turns:
             content = turn.message.get("content") or ""
             total += estimate_tokens(str(content))

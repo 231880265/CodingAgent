@@ -131,6 +131,13 @@ class Renderer:
             Text(f"  {self._g['warn']} 修改尚未验证：{paths}", style="bold yellow")
         )
 
+    def _on_acceptance_required(self, e: ev.AcceptanceRequired) -> None:
+        self._stop_thinking()
+        missing = "；".join(e.missing_items)
+        self.console.print(
+            Text(f"  {self._g['warn']} 交付面尚未覆盖：{missing}", style="bold yellow")
+        )
+
     def _on_continuation_required(self, e: ev.ContinuationRequired) -> None:
         self._stop_thinking()
         self.console.print(
