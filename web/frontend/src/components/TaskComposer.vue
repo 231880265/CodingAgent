@@ -12,6 +12,7 @@ const props = defineProps<{
   busy: boolean;
   disabled: boolean;
   mode: "mock" | "api";
+  model?: string | null;
   session: SessionResource | null;
 }>();
 
@@ -32,7 +33,21 @@ const form = reactive({
 const attachments = ref<AttachmentInput[]>([]);
 const validationMessage = ref("");
 const fileInput = ref<HTMLInputElement | null>(null);
+const selectedDisplayModel = ref("auto");
 let previousRunId = "";
+
+const displayModelOptions = computed(() => {
+  const options = [
+    { value: "auto", label: "自动选择" },
+    ...(props.model
+      ? [{ value: props.model, label: friendlyModelName(props.model) }]
+      : []),
+    { value: "claude-sonnet-4-6", label: "Claude Sonnet 4.6" },
+    { value: "deepseek-ai/DeepSeek-V4-Flash", label: "DeepSeek V4 Flash" },
+    { value: "gpt-5.5", label: "GPT 5.5" },
+  ];
+  return [...new Map(options.map((option) => [option.value, option])).values()];
+});
 
 const sendDisabled = computed(() => {
   if (props.active || props.busy || props.disabled || !form.prompt.trim()) return true;
@@ -49,6 +64,14 @@ const placeholder = computed(() => {
   if (props.session) return "等待当前 Run 或 Session 状态稳定…";
   return "描述要完成的代码任务";
 });
+
+watch(
+  () => props.model,
+  (model) => {
+    selectedDisplayModel.value = model || "auto";
+  },
+  { immediate: true },
+);
 
 watch(
   () => props.session,
@@ -158,6 +181,14 @@ function inferMediaType(name: string): string {
   return "text/plain";
 }
 
+function friendlyModelName(model: string): string {
+  const normalized = model.toLowerCase();
+  if (normalized.includes("claude-sonnet-4-6")) return "Claude Sonnet 4.6";
+  if (normalized.includes("deepseek-v4-flash")) return "DeepSeek V4 Flash";
+  if (normalized === "gpt-5.5") return "GPT 5.5";
+  return model;
+}
+
 function requestBytes(prompt: string, values: AttachmentInput[]): number {
   return new TextEncoder().encode(
     prompt + values.map((value) => value.name + value.mediaType + value.content).join(""),
@@ -219,6 +250,26 @@ function requestBytes(prompt: string, values: AttachmentInput[]): number {
           >
             <span aria-hidden="true">＋</span>
           </button>
+          <div class="composer-model-picker">
+            <svg class="model-bolt" viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M9.7 1.2 3.9 8.3h3.7l-1.2 6.5 5.8-7.2H8.6l1.1-6.4Z" />
+            </svg>
+            <select
+              v-model="selectedDisplayModel"
+              :disabled="disabled"
+              aria-label="选择显示模型"
+              title="选择模型"
+            >
+              <option
+                v-for="option in displayModelOptions"
+                :key="option.value"
+                :value="option.value"
+              >
+                {{ option.label }}
+              </option>
+            </select>
+            <span class="model-picker-caret" aria-hidden="true"></span>
+          </div>
         </div>
         <div class="composer-actions">
           <button

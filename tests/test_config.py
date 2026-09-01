@@ -90,6 +90,17 @@ def test_explicit_model_and_endpoint_override_provider_defaults(monkeypatch, tmp
     monkeypatch.setenv("HAKO_ENABLE_THINKING", "true")
     monkeypatch.setenv("HAKO_ENABLE_SUBAGENT", "true")
     monkeypatch.setenv("HAKO_SUBAGENT_MAX_STEPS", "4")
+    monkeypatch.setenv("HAKO_REPOSITORY_MEMORY_ENABLED", "false")
+    monkeypatch.setenv("HAKO_MEMORY_EMBEDDING_PROVIDER", "sentence_transformer")
+    monkeypatch.setenv("HAKO_MEMORY_TOP_K", "9")
+    monkeypatch.setenv("HAKO_MEMORY_RELEVANCE_WEIGHT", "0.6")
+    monkeypatch.setenv("HAKO_MEMORY_RERANK_ENABLED", "true")
+    monkeypatch.setenv("HAKO_MEMORY_RERANK_TIMEOUT_SECONDS", "12.5")
+    monkeypatch.setenv("HAKO_COMPACTION_ENABLED", "true")
+    monkeypatch.setenv("HAKO_COMPACTION_THRESHOLD", "0.82")
+    monkeypatch.setenv("HAKO_COMPACTION_KEEP_RECENT_MESSAGES", "16")
+    monkeypatch.setenv("HAKO_COMPACTION_MODEL", "summary-model")
+    monkeypatch.setenv("HAKO_COMPACTION_TIMEOUT_SECONDS", "9.5")
 
     config = Config.from_env(workspace=tmp_path)
 
@@ -100,3 +111,14 @@ def test_explicit_model_and_endpoint_override_provider_defaults(monkeypatch, tmp
     assert config.enable_thinking is True
     assert config.enable_subagent is True
     assert config.subagent_max_steps == 4
+    assert config.repository_memory_enabled is False
+    assert config.memory_embedding_provider == "sentence_transformer"
+    assert config.memory_top_k == 9
+    assert config.memory_relevance_weight == pytest.approx(0.6)
+    assert config.memory_rerank_enabled is True
+    assert config.memory_rerank_timeout_seconds == pytest.approx(12.5)
+    assert config.compaction_enabled is True
+    assert config.compaction_threshold == pytest.approx(0.82)
+    assert config.compaction_keep_recent_messages == 16
+    assert config.compaction_model == "summary-model"
+    assert config.compaction_timeout_seconds == pytest.approx(9.5)

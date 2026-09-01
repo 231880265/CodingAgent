@@ -8,6 +8,7 @@ import dev.hako.web.domain.BufferedEvent;
 import dev.hako.web.domain.RunState;
 import dev.hako.web.domain.SessionState;
 import jakarta.annotation.PostConstruct;
+import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
@@ -316,6 +317,29 @@ public class SessionHistoryRepository {
                     memories.add(parseObject(result.getString("run_memory_json")));
                 },
                 sessionId.toString());
+        return memories;
+    }
+
+    public ArrayNode getRepositoryMemorySnapshot(Path workspace) {
+        ArrayNode memories = mapper.createArrayNode();
+        jdbc.query(
+                """
+                SELECT run_memory_json FROM (
+                    SELECT s.created_at AS session_created_at,
+                           r.ordinal,
+                           r.run_memory_json
+                    FROM runs r
+                    JOIN sessions s ON s.session_id=r.session_id
+                    WHERE s.workspace=? AND r.run_memory_json IS NOT NULL
+                    ORDER BY s.created_at DESC, r.ordinal DESC
+                    LIMIT 200
+                )
+                ORDER BY session_created_at, ordinal
+                """,
+                result -> {
+                    memories.add(parseObject(result.getString("run_memory_json")));
+                },
+                workspace.toString());
         return memories;
     }
 

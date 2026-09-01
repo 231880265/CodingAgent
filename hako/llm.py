@@ -92,11 +92,19 @@ class LLMClient:
         model: str,
         max_output_tokens: int = 4096,
         enable_thinking: bool | None = None,
+        timeout_seconds: float = 120.0,
+        max_attempts: int = 4,
     ) -> None:
         self.model = model
         self.max_output_tokens = max(1, int(max_output_tokens))
         self.enable_thinking = enable_thinking
-        self._client = OpenAI(api_key=api_key, base_url=base_url, timeout=120.0, max_retries=0)
+        self.max_attempts = max(1, int(max_attempts))
+        self._client = OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=max(1.0, float(timeout_seconds)),
+            max_retries=0,
+        )
 
     def complete(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
@@ -104,7 +112,7 @@ class LLMClient:
         """一次请求。网络类错误自己退避重试，业务类错误直接抛。"""
         last_error: Exception | None = None
 
-        for attempt in range(4):
+        for attempt in range(self.max_attempts):
             try:
                 request: dict[str, Any] = {
                     "model": self.model,
@@ -132,7 +140,9 @@ class LLMClient:
                 last_error = exc
                 time.sleep(min(2**attempt, 8))
 
-        raise RuntimeError(f"模型请求连续 4 次失败：{last_error}") from last_error
+        raise RuntimeError(
+            f"模型请求连续 {self.max_attempts} 次失败：{last_error}"
+        ) from last_error
 
     def _normalize(self, response: Any) -> ModelReply:
         choice = response.choices[0]

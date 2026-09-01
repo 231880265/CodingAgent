@@ -62,6 +62,27 @@ class Config:
     # 默认关闭，便于对照；开启后主 Agent 多一个受限的只读调查工具。
     enable_subagent: bool = False
     subagent_max_steps: int = 6
+    # Repository Experience Memory：跨 Session 检索同一工作区的工程事实。
+    repository_memory_enabled: bool = True
+    memory_embedding_provider: str = "hash"
+    memory_embedding_model: str = "BAAI/bge-small-zh-v1.5"
+    memory_top_k: int = 6
+    memory_dense_backup_k: int = 4
+    memory_rerank_top_k: int = 4
+    memory_relevance_weight: float = 0.7
+    memory_importance_weight: float = 0.2
+    memory_recency_weight: float = 0.1
+    memory_recency_lambda: float = 0.01
+    memory_rerank_enabled: bool = False
+    memory_rerank_model: str = ""
+    memory_rerank_timeout_seconds: float = 20.0
+    # 单 Run Working Memory 压缩。默认关闭，确保现有短任务行为完全不变；
+    # 开启后只改变下一次模型请求的临时 Conversation View，不改审计历史。
+    compaction_enabled: bool = False
+    compaction_threshold: float = 0.70
+    compaction_keep_recent_messages: int = 12
+    compaction_model: str = ""
+    compaction_timeout_seconds: float = 20.0
 
     @classmethod
     def from_env(cls, workspace: Path | None = None) -> "Config":
@@ -129,6 +150,38 @@ class Config:
             enable_thinking=enable_thinking,
             enable_subagent=_bool_env("HAKO_ENABLE_SUBAGENT", False),
             subagent_max_steps=_int_env("HAKO_SUBAGENT_MAX_STEPS", 6),
+            repository_memory_enabled=_bool_env("HAKO_REPOSITORY_MEMORY_ENABLED", True),
+            memory_embedding_provider=(
+                os.environ.get("HAKO_MEMORY_EMBEDDING_PROVIDER", "").strip().lower()
+                or "hash"
+            ),
+            memory_embedding_model=(
+                os.environ.get("HAKO_MEMORY_EMBEDDING_MODEL", "").strip()
+                or "BAAI/bge-small-zh-v1.5"
+            ),
+            memory_top_k=_int_env("HAKO_MEMORY_TOP_K", 6),
+            memory_dense_backup_k=_int_env("HAKO_MEMORY_DENSE_BACKUP_K", 4),
+            memory_rerank_top_k=_int_env("HAKO_MEMORY_RERANK_TOP_K", 4),
+            memory_relevance_weight=_float_env("HAKO_MEMORY_RELEVANCE_WEIGHT", 0.7),
+            memory_importance_weight=_float_env("HAKO_MEMORY_IMPORTANCE_WEIGHT", 0.2),
+            memory_recency_weight=_float_env("HAKO_MEMORY_RECENCY_WEIGHT", 0.1),
+            memory_recency_lambda=_float_env("HAKO_MEMORY_RECENCY_LAMBDA", 0.01),
+            memory_rerank_enabled=_bool_env("HAKO_MEMORY_RERANK_ENABLED", False),
+            memory_rerank_model=os.environ.get("HAKO_MEMORY_RERANK_MODEL", "").strip(),
+            memory_rerank_timeout_seconds=_float_env(
+                "HAKO_MEMORY_RERANK_TIMEOUT_SECONDS", 20.0
+            ),
+            compaction_enabled=_bool_env("HAKO_COMPACTION_ENABLED", False),
+            compaction_threshold=_bounded_float_env(
+                "HAKO_COMPACTION_THRESHOLD", 0.70, minimum=0.05, maximum=0.95
+            ),
+            compaction_keep_recent_messages=max(
+                2, _int_env("HAKO_COMPACTION_KEEP_RECENT_MESSAGES", 12)
+            ),
+            compaction_model=os.environ.get("HAKO_COMPACTION_MODEL", "").strip(),
+            compaction_timeout_seconds=max(
+                1.0, _float_env("HAKO_COMPACTION_TIMEOUT_SECONDS", 20.0)
+            ),
         )
 
 
@@ -137,6 +190,20 @@ def _int_env(name: str, default: int) -> int:
         return int(os.environ.get(name, "").strip() or default)
     except ValueError:
         return default
+
+
+def _float_env(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, "").strip() or default)
+    except ValueError:
+        return default
+
+
+def _bounded_float_env(
+    name: str, default: float, *, minimum: float, maximum: float
+) -> float:
+    value = _float_env(name, default)
+    return min(maximum, max(minimum, value))
 
 
 def _bool_value(raw: str, name: str) -> bool:

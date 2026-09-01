@@ -126,7 +126,8 @@ describe("RunTimeline transcript hierarchy", () => {
 
     expect(user.querySelector(".user-prompt-block")).not.toBeNull();
     expect(user.querySelector(".user-avatar")?.textContent).toBe("你");
-    expect(assistant.querySelector(".assistant-avatar")?.textContent).toBe("h");
+    expect(assistant.querySelector(".assistant-avatar")).toBeNull();
+    expect(assistant.querySelector(".assistant-identity strong")?.textContent).toBe("hako");
     expect(assistant.querySelector(".assistant-answer strong")?.textContent).toBe("南京");
     expect(assistant.querySelector(".tool-activity")).toBeNull();
     expect(user.compareDocumentPosition(assistant) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();

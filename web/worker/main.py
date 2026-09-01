@@ -15,6 +15,14 @@ from hako.config import Config  # noqa: E402
 from hako.events import EventBus  # noqa: E402
 from hako.llm import LLMClient  # noqa: E402
 from hako.loop import Agent  # noqa: E402
+from hako.memory import (  # noqa: E402
+    HashingEmbeddingProvider,
+    LLMReranker,
+    MemorySettings,
+    RepositoryMemoryService,
+    SentenceTransformerEmbeddingProvider,
+    make_search_repository_memory,
+)
 from hako.subagent import make_delegate_readonly  # noqa: E402
 from hako.tools import build_default_registry  # noqa: E402
 from web.worker.approval import ApprovalCoordinator, ApprovalInput  # noqa: E402
@@ -36,10 +44,22 @@ def build_web_agent(
     approve: ApprovalCoordinator,
     cancelled: Callable[[], bool],
     memory_index: MemoryIndex,
+    config: Config | None = None,
+    repository_memory: RepositoryMemoryService | None = None,
 ) -> Agent:
-    config = Config.from_env(workspace=workspace)
+    config = config or Config.from_env(workspace=workspace)
     config.max_steps = max_steps
-    extra_tools = [make_search_session_history(memory_index, config.tool_result_budget)]
+    extra_tools = [
+        make_search_session_history(
+            memory_index,
+            config.tool_result_budget,
+            repository_memory=repository_memory,
+        )
+    ]
+    if repository_memory is not None:
+        extra_tools.append(
+            make_search_repository_memory(repository_memory, config.tool_result_budget)
+        )
     if config.enable_subagent:
         extra_tools.append(make_delegate_readonly(config, bus))
     registry = build_default_registry(
@@ -64,6 +84,50 @@ def build_web_agent(
     )
 
 
+def build_repository_memory(
+    config: Config,
+    snapshot: list[dict],
+) -> RepositoryMemoryService | None:
+    if not config.repository_memory_enabled:
+        return None
+    provider_name = config.memory_embedding_provider
+    if provider_name == "hash":
+        provider = HashingEmbeddingProvider()
+    elif provider_name in {"sentence_transformer", "sentence-transformer", "bge"}:
+        provider = SentenceTransformerEmbeddingProvider(config.memory_embedding_model)
+    else:
+        raise SystemExit(
+            "HAKO_MEMORY_EMBEDDING_PROVIDER 仅支持 hash 或 sentence_transformer。"
+        )
+    reranker = None
+    if config.memory_rerank_enabled:
+        reranker = LLMReranker(
+            LLMClient(
+                config.api_key,
+                config.base_url,
+                config.memory_rerank_model or config.model,
+                max_output_tokens=512,
+                enable_thinking=config.enable_thinking,
+                timeout_seconds=config.memory_rerank_timeout_seconds,
+                max_attempts=1,
+            )
+        )
+    return RepositoryMemoryService(
+        str(config.workspace),
+        snapshot,
+        embedding_provider=provider,
+        fallback_provider=HashingEmbeddingProvider(),
+        reranker=reranker,
+        settings=MemorySettings(
+            top_k=config.memory_top_k,
+            dense_backup_k=config.memory_dense_backup_k,
+            rerank_top_k=config.memory_rerank_top_k,
+            relevance_weight=config.memory_relevance_weight,
+            importance_weight=config.memory_importance_weight,
+            recency_weight=config.memory_recency_weight,
+            recency_lambda=config.memory_recency_lambda,
+        ),
+    )
 def _attachment_context(payload: dict) -> str:
     raw = payload.get("attachments", [])
     if not isinstance(raw, list):
@@ -113,9 +177,30 @@ def _memory_snapshot(payload: dict) -> list[dict]:
     return raw
 
 
+def _repository_memory_snapshot(payload: dict) -> list[dict]:
+    raw = payload.get("repositoryMemorySnapshot", [])
+    if not isinstance(raw, list) or len(raw) > 200:
+        raise ProtocolError(
+            "repositoryMemorySnapshot must be an array with at most 200 runs"
+        )
+    if any(not isinstance(item, dict) or not isinstance(item.get("runId"), str) for item in raw):
+        raise ProtocolError("repositoryMemorySnapshot contains an invalid RunMemory")
+    return raw
+
+
 def _start_payload(
     message: dict,
-) -> tuple[str, str, Path, str, int, str, list[dict[str, str]], list[dict]]:
+) -> tuple[
+    str,
+    str,
+    Path,
+    str,
+    int,
+    str,
+    list[dict[str, str]],
+    list[dict],
+    list[dict],
+]:
     if message.get("type") != "start":
         raise ProtocolError("Worker 第一条输入必须是 start。")
     payload = message.get("payload")
@@ -151,10 +236,13 @@ def _start_payload(
         _attachment_context(payload),
         _semantic_history(payload),
         _memory_snapshot(payload),
+        _repository_memory_snapshot(payload),
     )
 
 
-def _run_payload(message: dict, session_id: str) -> tuple[str, str, int, str, list[dict]]:
+def _run_payload(
+    message: dict, session_id: str
+) -> tuple[str, str, int, str, list[dict], list[dict]]:
     if message.get("type") != "run":
         raise ProtocolError("后续输入必须是 run。")
     payload = message.get("payload")
@@ -177,6 +265,7 @@ def _run_payload(message: dict, session_id: str) -> tuple[str, str, int, str, li
         max_steps,
         _attachment_context(payload),
         _memory_snapshot(payload),
+        _repository_memory_snapshot(payload),
     )
 
 
@@ -198,6 +287,7 @@ def run() -> int:
             attachments,
             semantic_history,
             memory_snapshot,
+            repository_memory_snapshot,
         ) = _start_payload(start)
 
         incoming = ApprovalInput(sys.stdin, session_id=session_id)
@@ -213,6 +303,10 @@ def run() -> int:
             incoming=incoming,
         )
         memory_index = MemoryIndex(memory_snapshot)
+        config = Config.from_env(workspace=workspace)
+        repository_memory = build_repository_memory(config, repository_memory_snapshot)
+        if repository_memory is not None:
+            bus.subscribe(repository_memory.observe_event)
         agent = build_web_agent(
             workspace=workspace,
             max_steps=max_steps,
@@ -220,6 +314,8 @@ def run() -> int:
             approve=approve,
             cancelled=incoming.is_cancelled,
             memory_index=memory_index,
+            config=config,
+            repository_memory=repository_memory,
         )
         try:
             agent.conversation.restore_semantic(
@@ -235,10 +331,19 @@ def run() -> int:
             result = agent.run(prompt, attachment_context=attachments)
             writer.run_message("result", session_id, run_id, result_payload(result))
             follow_up = incoming.next_goal()
-            run_id, prompt, max_steps, attachments, memory_snapshot = _run_payload(
+            (
+                run_id,
+                prompt,
+                max_steps,
+                attachments,
+                memory_snapshot,
+                repository_memory_snapshot,
+            ) = _run_payload(
                 follow_up, session_id
             )
             memory_index.update(memory_snapshot)
+            if repository_memory is not None:
+                repository_memory.update(repository_memory_snapshot)
             agent.conversation.compact_for_follow_up(
                 memory_context=memory_index.session_context()
             )

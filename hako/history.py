@@ -31,6 +31,8 @@ class Turn:
     semantic: bool = True
     tool_path: str = ""          # read_file 读的是哪个文件
     stale: bool = False
+    tool_ok: bool | None = None
+    tool_summary: str = ""
 
 
 PLACEHOLDER = (
@@ -157,7 +159,14 @@ class Conversation:
         self.turns.append(Turn(message))
 
     def add_tool_result(
-        self, call_id: str, name: str, detail: str, path: str = ""
+        self,
+        call_id: str,
+        name: str,
+        detail: str,
+        path: str = "",
+        *,
+        ok: bool | None = None,
+        summary: str = "",
     ) -> None:
         # 每个 tool_call 都必须有配对的 tool 消息，否则下一轮请求会被 API 拒绝。
         # 即使解析失败或用户拒绝执行，也要回一条——这是硬约束，不是可选项。
@@ -166,6 +175,8 @@ class Conversation:
                 {"role": "tool", "tool_call_id": call_id, "content": detail},
                 tool_name=name,
                 tool_path=path,
+                tool_ok=ok,
+                tool_summary=summary,
             )
         )
 

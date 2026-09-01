@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -18,6 +19,14 @@ from .acceptance import (
     evaluate_acceptance,
 )
 from .config import Config
+from .compaction import (
+    ContextBudgetGuard,
+    PreparedContext,
+    RunCompactionFacts,
+    SummaryEnhancer,
+    VerificationFact,
+    build_optional_enhancer,
+)
 from .history import Conversation
 from .llm import LLMClient, ModelReply
 from .prompt import build_system_prompt
@@ -36,6 +45,7 @@ MAX_CONTINUATION_NUDGES = 2
 
 ApprovalFn = Callable[[Tool, dict], bool]
 CancelledFn = Callable[[], bool]
+logger = logging.getLogger(__name__)
 
 
 class StopReason(str, Enum):
@@ -140,6 +150,7 @@ class Agent:
         approve: ApprovalFn | None = None,
         cancelled: CancelledFn | None = None,
         system_prompt: str | None = None,
+        compaction_enhancer: SummaryEnhancer | None = None,
     ) -> None:
         self.config = config
         self.registry = registry
@@ -150,6 +161,13 @@ class Agent:
         self.approve = approve or (lambda tool, args: not tool.needs_approval)
         # Web Worker 用协作式取消保活同一 Session；CLI 默认永不取消。
         self.cancelled = cancelled or (lambda: False)
+        self.compaction_enhancer = compaction_enhancer or build_optional_enhancer(
+            api_key=config.api_key,
+            base_url=config.base_url,
+            model=config.compaction_model,
+            timeout_seconds=config.compaction_timeout_seconds,
+            enable_thinking=config.enable_thinking,
+        )
         self.conversation = Conversation(
             system_prompt=(
                 system_prompt
@@ -167,6 +185,7 @@ class Agent:
         self.bus.emit(
             ev.RunStarted(task=task, model=self.config.model, cwd=str(self.config.workspace))
         )
+        run_start_index = len(self.conversation.turns)
         user_message = task
         if attachment_context:
             user_message += (
@@ -178,6 +197,17 @@ class Agent:
         call_counts: dict[str, int] = {}
         tool_call_counts: dict[str, int] = {}
         state = _RunState(acceptance_plan=build_acceptance_plan(task))
+        budget_guard = ContextBudgetGuard(
+            enabled=self.config.compaction_enabled,
+            context_limit=self.config.context_limit,
+            threshold=self.config.compaction_threshold,
+            keep_recent_messages=self.config.compaction_keep_recent_messages,
+            run_start_index=run_start_index,
+            enhancer=self.compaction_enhancer,
+        )
+        # Exposed for deterministic diagnostics/tests; it is reset for every Run.
+        self.last_context_budget_guard = budget_guard
+        tool_schemas = self.registry.schemas()
         if state.acceptance_plan.active:
             self.bus.emit(
                 ev.AcceptancePlanned(
@@ -194,18 +224,46 @@ class Agent:
             self.bus.emit(ev.TurnStarted(step=step, max_steps=self.config.max_steps))
 
             try:
+                prepared = budget_guard.prepare(
+                    self.conversation,
+                    tool_schemas,
+                    self._compaction_facts(state),
+                )
+            except Exception as exc:  # noqa: BLE001
+                # Compaction is an optional view optimization. A defect or bad
+                # summary must never become an Agent Run failure.
+                logger.warning("compaction_failed fallback=original error=%s", exc)
+                messages = self.conversation.to_messages()
+                prepared = PreparedContext(
+                    messages=messages,
+                    estimated_tokens=self.conversation.estimated_tokens(),
+                    compacted=False,
+                )
+
+            try:
                 reply = self.client.complete(
-                    self.conversation.to_messages(), self.registry.schemas()
+                    prepared.messages, tool_schemas
                 )
             except Exception as exc:  # noqa: BLE001
                 self.bus.emit(ev.AgentError(message=str(exc)))
                 return self._finish(StopReason.ERROR, step, final_text, state)
 
+            budget_guard.observe(
+                prompt_tokens=reply.prompt_tokens,
+                estimated_tokens=prepared.estimated_tokens,
+            )
             self.conversation.total_prompt_tokens += reply.prompt_tokens
             self.conversation.total_completion_tokens += reply.completion_tokens
             self.bus.emit(
                 ev.ContextStats(
-                    used_tokens=reply.prompt_tokens or self.conversation.estimated_tokens(),
+                    used_tokens=(
+                        reply.prompt_tokens
+                        or (
+                            prepared.estimated_tokens
+                            if self.config.compaction_enabled
+                            else self.conversation.estimated_tokens()
+                        )
+                    ),
                     limit=self.config.context_limit,
                     message_count=len(self.conversation.turns),
                 )
@@ -318,6 +376,16 @@ class Agent:
             item for item in coverage.missing if item.evidence_kind != "verification"
         )
         return AcceptanceCoverage(coverage.covered, delivery_missing)
+
+    @staticmethod
+    def _compaction_facts(state: _RunState) -> RunCompactionFacts:
+        return RunCompactionFacts(
+            changed_paths=tuple(sorted(state.changed_paths)),
+            verification=tuple(
+                VerificationFact(item.kind, item.command, item.summary)
+                for item in state.evidence
+            ),
+        )
 
     # ------------------------------------------------------------ 工具执行
 
@@ -446,6 +514,8 @@ class Agent:
                 call.name,
                 detail,
                 path=result.subject_path or str(execution_args.get("path", "")),
+                ok=result.ok,
+                summary=result.summary,
             )
 
             if call.name == "read_file" and result.ok:

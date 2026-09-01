@@ -1,7 +1,7 @@
-"""Session-scoped, read-only history retrieval for the Web Worker.
+"""Read-only Session and same-workspace history retrieval for the Web Worker.
 
-The backend owns persistence and sends a bounded RunMemory snapshot.  This
-module never opens SQLite, so a Worker cannot cross the Session boundary.
+The backend owns persistence and sends bounded Session and repository snapshots.
+This module never opens SQLite or escapes the workspace scope selected upstream.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ import re
 from copy import deepcopy
 from typing import Any
 
+from hako.memory import RepositoryMemoryService, repository_memory_payload
 from hako.tools import Tool, ToolError, ToolResult
 
 KINDS = {"goal", "change", "verification", "approval", "failure", "summary"}
@@ -96,34 +97,78 @@ class MemoryIndex:
         return [_public_memory(memory) for _, _, memory in ranked[:limit]]
 
 
-def make_search_session_history(index: MemoryIndex, budget: int = 6_000) -> Tool:
+def make_search_session_history(
+    index: MemoryIndex,
+    budget: int = 6_000,
+    repository_memory: RepositoryMemoryService | None = None,
+) -> Tool:
     def handler(
         query: str,
         run_id: str = "",
         kinds: list[str] | None = None,
         limit: int = 8,
     ) -> ToolResult:
-        matches = index.search(query, run_id=run_id.strip(), kinds=kinds, limit=limit)
+        exact_run_id = run_id.strip()
+        session_matches = index.search(
+            query, run_id=exact_run_id, kinds=kinds, limit=limit
+        )
+        matches = session_matches
+        searched_scopes = ["session"]
+        selected_scope = "session" if session_matches else "none"
+        repository_search: dict[str, Any] | None = None
+
+        # An exact Run filter intentionally remains Session-scoped. For ordinary
+        # follow-ups, an empty current Session is not proof that this workspace has
+        # no history, so search the bounded same-workspace snapshot automatically.
+        if not session_matches and not exact_run_id and repository_memory is not None:
+            searched_scopes.append("repository")
+            repository_payload = repository_memory_payload(repository_memory, query)
+            matches = repository_payload["matches"]
+            selected_scope = "repository" if matches else "none"
+            repository_search = {
+                key: value
+                for key, value in repository_payload.items()
+                if key not in {"notice", "matches"}
+            }
+
         payload = {
             "notice": (
-                "Historical evidence may be stale. Re-read the current workspace before "
-                "using old code details. Hard event facts override semanticSummary."
+                "Search order is current Session, then earlier Sessions from the same "
+                "workspace when available. selectedScope identifies the returned source. "
+                "Historical evidence may be stale; re-read current files before using old "
+                "code details. Hard event facts override semanticSummary."
             ),
+            "searchedScopes": searched_scopes,
+            "selectedScope": selected_scope,
+            "sessionMatchCount": len(session_matches),
             "matches": matches,
         }
+        if repository_search is not None:
+            payload["repositorySearch"] = repository_search
         detail = _clip(json.dumps(payload, ensure_ascii=False, indent=2), budget)
+        if selected_scope == "repository":
+            summary = f"history fallback: repository {len(matches)} match(es)"
+        elif selected_scope == "session":
+            summary = f"session history: {len(matches)} match(es)"
+        elif "repository" in searched_scopes:
+            summary = "history: no match in session or repository"
+        else:
+            summary = "session history: 0 match(es)"
         return ToolResult(
             ok=True,
             detail=detail,
-            summary=f"session history: {len(matches)} match(es)",
+            summary=summary,
         )
 
     return Tool(
         name="search_session_history",
         description=(
-            "Search earlier goals, file changes, approvals, failures and verification evidence "
-            "from this Web Session. Use it only when a follow-up refers to earlier work; "
-            "re-read current files before relying on historical code details."
+            "Search earlier goals, file changes, approvals, failures and verification evidence. "
+            "The tool checks this Web Session first, then automatically falls back to earlier "
+            "Sessions from the same workspace when the Session has no match. An exact run_id "
+            "remains Session-scoped. Do not claim that no prior work exists unless searchedScopes "
+            "includes repository and matches is empty. Re-read current files before relying on "
+            "historical code details."
         ),
         parameters={
             "type": "object",

@@ -598,7 +598,6 @@ function beginsNewFileStage(activity: ToolEntry): boolean {
           aria-label="hako 回复"
         >
           <header class="assistant-role">
-            <span class="assistant-avatar" aria-hidden="true">h</span>
             <span class="assistant-identity">
               <strong>hako</strong>
               <time v-if="group.assistantAt" :datetime="group.assistantAt">{{ formatTime(group.assistantAt) }}</time>

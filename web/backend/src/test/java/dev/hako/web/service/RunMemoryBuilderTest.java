@@ -50,6 +50,43 @@ class RunMemoryBuilderTest {
         assertFalse(memory.path("semanticSummary").path("authoritative").asBoolean());
     }
 
+    @Test
+    void recordsObservedFilesAndAcceptanceConstraintsFromEvents() {
+        UUID sessionId = UUID.randomUUID();
+        RunState run = new RunState("修复发布后仍读取旧版本", 20, List.of());
+        run.status = RunStatus.COMPLETED;
+        run.startedAt = Instant.parse("2026-08-31T02:00:00Z");
+        run.finishedAt = Instant.parse("2026-08-31T02:01:00Z");
+        run.outcome = mapper.createObjectNode();
+
+        ObjectNode started = envelope(sessionId, run, 1, "tool_call_started");
+        started.withObject("/payload").put("callId", "read-1");
+        started.withObject("/payload").put("name", "read_file");
+        started.withObject("/payload")
+                .putObject("args")
+                .put("file_path", "app/repositories/campaign_repository.py");
+
+        ObjectNode finished = envelope(sessionId, run, 2, "tool_call_finished");
+        finished.withObject("/payload").put("callId", "read-1");
+        finished.withObject("/payload").put("name", "read_file");
+        finished.withObject("/payload").put("ok", true);
+
+        ObjectNode acceptance = envelope(sessionId, run, 3, "acceptance_planned");
+        acceptance.withObject("/payload")
+                .putArray("items")
+                .add("发布后线上版本切换到新草稿")
+                .add("完整回归测试通过");
+
+        ObjectNode memory = new RunMemoryBuilder(mapper).build(
+                sessionId, run, List.of(started, finished, acceptance));
+
+        assertEquals(
+                "app/repositories/campaign_repository.py",
+                memory.path("observedFiles").path(0).asText());
+        assertEquals("发布后线上版本切换到新草稿", memory.path("constraints").path(0).asText());
+        assertEquals("完整回归测试通过", memory.path("constraints").path(1).asText());
+    }
+
     private ObjectNode envelope(UUID sessionId, RunState run, long eventId, String type) {
         ObjectNode event = mapper.createObjectNode();
         event.put("eventId", eventId);

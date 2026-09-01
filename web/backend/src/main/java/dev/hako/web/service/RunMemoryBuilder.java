@@ -36,6 +36,8 @@ final class RunMemoryBuilder {
         Set<String> modified = new LinkedHashSet<>();
         Set<String> deleted = new LinkedHashSet<>();
         Set<String> derived = new LinkedHashSet<>();
+        Set<String> observed = new LinkedHashSet<>();
+        Set<String> constraints = new LinkedHashSet<>();
         Map<String, ObjectNode> startedCalls = new LinkedHashMap<>();
         Map<String, ObjectNode> approvals = new LinkedHashMap<>();
         ArrayNode verifications = memory.putArray("verifications");
@@ -65,13 +67,20 @@ final class RunMemoryBuilder {
                 }
 
                 String callId = payload.path("callId").asText();
+                ObjectNode started = startedCalls.get(callId);
+                String toolName = payload.path("name").asText("");
+                if (payload.path("ok").asBoolean(false) && "read_file".equals(toolName)) {
+                    String observedPath = startedPath(started);
+                    if (observedPath != null) {
+                        observed.add(observedPath);
+                    }
+                }
                 String verificationKind = payload.path("verificationKind").asText("");
                 if (!verificationKind.isBlank()) {
                     ObjectNode item = verifications.addObject();
                     item.put("eventId", eventId);
                     item.put("callId", callId);
                     item.put("kind", verificationKind);
-                    ObjectNode started = startedCalls.get(callId);
                     putNullable(
                             item,
                             "requestedCommand",
@@ -93,6 +102,10 @@ final class RunMemoryBuilder {
                     putInteger(failure, "exitCode", payload.path("exitCode"));
                     failure.put("summary", payload.path("summary").asText(""));
                 }
+                continue;
+            }
+            if ("acceptance_planned".equals(type)) {
+                addStrings(constraints, payload.path("items"));
                 continue;
             }
             if ("approval_required".equals(type)) {
@@ -130,6 +143,9 @@ final class RunMemoryBuilder {
         addArray(changes, "modified", modified);
         addArray(changes, "deleted", deleted);
         addArray(changes, "derived", derived);
+        addArray(memory, "observedFiles", observed);
+        memory.putArray("decisions");
+        addArray(memory, "constraints", constraints);
         ArrayNode approvalArray = memory.putArray("approvals");
         approvals.values().forEach(approvalArray::add);
         ArrayNode evidenceIds = memory.putArray("evidenceIds");
@@ -152,6 +168,18 @@ final class RunMemoryBuilder {
             return status;
         }
         return payload.path("ok").asBoolean(false) ? "succeeded" : "failed";
+    }
+
+    private static String startedPath(ObjectNode started) {
+        if (started == null) {
+            return null;
+        }
+        JsonNode args = started.path("args");
+        String path = args.path("path").asText("").trim();
+        if (path.isEmpty()) {
+            path = args.path("file_path").asText("").trim();
+        }
+        return path.isEmpty() ? null : path;
     }
 
     private static String text(ObjectNode node, String field) {

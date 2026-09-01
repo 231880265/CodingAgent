@@ -9,7 +9,6 @@ const props = defineProps<{
   runStatus: RunStatus | "IDLE";
   sessionStatus: SessionStatus | "NONE";
   mode: "mock" | "api";
-  model: string | null;
   workspace: string | null;
   stopReason: StopReason | null;
 }>();
@@ -37,8 +36,8 @@ const connectionLabel = computed(() => {
 <template>
   <header class="app-header">
     <div class="brand-block">
-      <div class="brand-mark" aria-hidden="true">h</div>
       <strong class="brand-name">hako</strong>
+      <span class="brand-caret" aria-hidden="true"></span>
     </div>
 
     <div
@@ -54,7 +53,6 @@ const connectionLabel = computed(() => {
       <button type="button" class="header-quiet-action" @click="emit('history')">
         会话
       </button>
-      <span v-if="model" class="model-name" :title="model">{{ model }}</span>
       <span class="connection-state" :data-state="connection">
         <span class="status-dot" aria-hidden="true"></span>
         {{ mode === "mock" ? "界面演示" : connectionLabel }}

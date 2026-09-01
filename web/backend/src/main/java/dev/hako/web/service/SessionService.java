@@ -692,6 +692,9 @@ public class SessionService {
         } else {
             payload.set("memorySnapshot", history.getMemorySnapshot(session.sessionId));
         }
+        payload.set(
+                "repositoryMemorySnapshot",
+                history.getRepositoryMemorySnapshot(session.workspace));
         putAttachments(payload, run.attachments);
         sendWorkerLocked(session, message, "无法发送 Worker start 消息。");
         session.startSent = true;
@@ -705,6 +708,9 @@ public class SessionService {
         payload.put("prompt", run.prompt);
         payload.put("maxSteps", run.maxSteps);
         payload.set("memorySnapshot", history.getMemorySnapshot(session.sessionId));
+        payload.set(
+                "repositoryMemorySnapshot",
+                history.getRepositoryMemorySnapshot(session.workspace));
         putAttachments(payload, run.attachments);
         sendWorkerLocked(session, message, "无法把后续 Run 发送给 Worker。");
     }
