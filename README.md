@@ -1,8 +1,8 @@
 # hako
 
-`hako` 是一个面向本地代码仓库的通用 Coding Agent。它可以完成 Bug 修复、小型功能开发、局部重构和补充测试，也能在空目录中创建基础程序；项目重点不是堆叠功能，而是让多轮代码修改具备**状态一致性、修改可控性和完成可信度**。
+hako 是一个面向本地代码仓库的通用 Coding Agent。它的核心设计是将模型决策与可靠执行分离：LLM 负责判断下一步做什么，自研 Harness 负责上下文组织、Tool Call 校验、本地执行、权限控制、错误反馈和完成判定。
 
-模型不会直接接触文件系统。hako 把当前 Conversation 与手写工具 Schema 发送给兼容 OpenAI Tool Calling 的模型，解析模型返回的文本或 `tool_calls`，经过参数校验、路径边界和人工审批后，才在本地读取/修改文件或执行命令。工具结果继续写回 Conversation，直到主循环依据真实执行证据结束。
+用户可以通过自然语言让 Hako 回答仓库问题、创建文件、修复 Bug、实现小型功能和局部重构。模型不会直接接触文件系统，而是通过 Tool Call 提出 Action，由 Harness 校验和执行，再将真实 Tool Result 作为 Observation 回灌给模型，形成“决策—执行—观察—再决策”的 Agent Loop。
 
 ```text
 用户任务
@@ -130,13 +130,14 @@ Fake Worker 只用于确定性 UI 和协议测试，不能作为真实模型能�
 
 ## 完成判定
 
-| 结果 | 含义 |
-|---|---|
-| `DONE_READ_ONLY` | 没有作者文件修改，模型正常结束；前端再根据工具事实区分普通问答与仓库分析 |
-| `DONE_VERIFIED` | 有作者文件修改，且最后一次修改后存在成功的测试、构建或静态检查 |
-| `DONE_UNVERIFIED` | 已修改文件，但没有可接受的修改后验证证据 |
-| `INCOMPLETE` | 模型输出被截断且有限续跑仍未完成 |
-| `CANCELLED / DENIED / ERROR / STUCK / MAX_STEPS` | 分别表示取消、拒绝、不可恢复错误、无进展重复或达到安全预算 |
+
+| 结果                                             | 含义                                                                     |
+| ------------------------------------------------ | ------------------------------------------------------------------------ |
+| `DONE_READ_ONLY`                                 | 没有作者文件修改，模型正常结束；前端再根据工具事实区分普通问答与仓库分析 |
+| `DONE_VERIFIED`                                  | 有作者文件修改，且最后一次修改后存在成功的测试、构建或静态检查           |
+| `DONE_UNVERIFIED`                                | 已修改文件，但没有可接受的修改后验证证据                                 |
+| `INCOMPLETE`                                     | 模型输出被截断且有限续跑仍未完成                                         |
+| `CANCELLED / DENIED / ERROR / STUCK / MAX_STEPS` | 分别表示取消、拒绝、不可恢复错误、无进展重复或达到安全预算               |
 
 验证命令必须是单一、可审计的执行，例如 `python -m pytest -q`、`npm test`、`mvn test`、`cargo test`、`g++ main.cpp -o main.exe`。包含管道、命令拼接、`|| true` 或仅收集测试的命令不会成为完成证据。任何后续业务文件写入都会让此前验证过期。
 
@@ -167,11 +168,12 @@ npm run build
 
 2026-09-01 在当前工作树复测：
 
-| 范围 | 结果 |
-|---|---|
-| Python | `254 passed, 1 skipped` |
-| Spring Boot | `27 passed` |
-| Vue/Vitest | `42 passed` |
+
+| 范围         | 结果                                           |
+| ------------ | ---------------------------------------------- |
+| Python       | `254 passed, 1 skipped`                        |
+| Spring Boot  | `27 passed`                                    |
+| Vue/Vitest   | `42 passed`                                    |
 | 前端生产构建 | TypeScript 检查通过，`324 modules transformed` |
 
 GitHub Actions 在 Windows 与 Ubuntu、Python 3.12 上运行 Python 核心测试。真实模型测试不进入 CI，避免提交密钥、产生外部费用并混入网络服务波动。
@@ -184,7 +186,7 @@ GitHub Actions 在 Windows 与 Ubuntu、Python 3.12 上运行 Python 核心测�
 - 历史恢复只重建最近三组成对的用户输入与最终回答，并注入有界 RunMemory；不恢复旧 Worker、模型隐藏状态或过期工具观察。历史代码细节必须通过工具按需查找并重新读取当前仓库。
 - 仓库经验默认采用可离线复现的哈希词项向量；本地 Sentence Transformer 与 LLM reranker 是可选适配器。离线测试覆盖排序、失效、跨 Session 隔离和适配器异常恢复，不把特定外部模型的检索质量当作已验证结论。
 - 当前工具串行执行；本地基线中 list/read 耗时不足总墙钟 0.1%，没有把未证明有收益的工具并发包装成卖点。
-- 已实现 Run 边界的确定性裁剪，避免多轮工具日志无限累积；尚未实现运行中根据 token 阈值自动摘要的通用 compaction，因为当前场景没有触发该需求。
+- 已实现 Run 边界的确定性裁剪，避免多轮工具日志无限累积；已实现 Single-Run Context Compaction：模型请求前估算上下文预算，达到阈值后将较早的 Action、Tool Result 和执行轨迹压缩为结构化 Working Summary，同时保留原始 Goal、用户约束和最近消息。完整 Conversation 与 Event Log 不删除，Compaction 只改变下一轮提供给模型的工作视图。当前实现仍不能保证任意极端输入在一次压缩后必然低于 Provider hard limit。
 - 可选只读 subagent 的权限隔离和直接调用已测试，但真实标本中尚无稳定的模型自主采用收益，因此不列为核心卖点。
 
 ## 相关文档
