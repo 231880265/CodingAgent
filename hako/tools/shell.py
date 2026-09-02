@@ -150,7 +150,9 @@ def _terminate_process_tree(proc: subprocess.Popen[str]) -> None:
     """只终止本次 shell 命令树，保留上层 Python Worker。"""
     if proc.poll() is not None:
         return
-    if sys.platform == "win32":
+    # 进程树控制必须依据真实宿主系统。命令规范化测试会模拟
+    # ``sys.platform == "win32"``，但这不能让 Linux 进程误用 Windows flags。
+    if os.name == "nt":
         # CREATE_NEW_PROCESS_GROUP 让 PowerShell 及其编译器/测试子进程共享独立组。
         # 先向整组发送 CTRL_BREAK；这比只 kill PowerShell 父进程更可靠，后者会
         # 让 python/java/npm 子进程继续持有 stdout 管道，communicate() 仍会挂住。
@@ -201,7 +203,8 @@ def _run_cancellable(
         "env": env,
         "stdin": subprocess.DEVNULL,
     }
-    if sys.platform == "win32":
+    # 与命令文本的目标平台无关；这里只能使用当前 Python 的真实宿主系统。
+    if os.name == "nt":
         options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         options["start_new_session"] = True

@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
 import sys
 import threading
 import time
@@ -187,6 +189,7 @@ def test_run_command_records_the_normalized_windows_pytest(
 
     def fake_popen(argv, **kwargs):
         captured["argv"] = argv
+        captured["options"] = kwargs
         return FakeProcess()
 
     monkeypatch.setattr(shell_module.sys, "platform", "win32")
@@ -208,6 +211,14 @@ def test_run_command_records_the_normalized_windows_pytest(
     assert result.verification_command.endswith("-m pytest -q")
     assert "current Python" in result.summary
     assert "bare pytest" in result.detail
+    options = captured["options"]
+    assert isinstance(options, dict)
+    if os.name == "nt":
+        assert options["creationflags"] == subprocess.CREATE_NEW_PROCESS_GROUP
+        assert "start_new_session" not in options
+    else:
+        assert options["start_new_session"] is True
+        assert "creationflags" not in options
 
 
 def test_run_command_uses_and_records_project_test_entry(monkeypatch, workspace: Path):
