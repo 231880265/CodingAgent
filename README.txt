@@ -1,4 +1,3 @@
-Hako —— Coding Agent
 
 一、Git 仓库
 https://github.com/231880265/CodingAgent.git

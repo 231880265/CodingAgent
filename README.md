@@ -74,7 +74,6 @@ web/
   worker/                       真实 / Fake JSONL Worker
   backend/                      Spring Boot Session/Run、SSE 与历史持久化
   frontend/                     Vue 3 对话界面、审批与证据呈现
-docs/                           Web API、需求与 Session/Run 架构
 ```
 
 ## 快速开始
@@ -126,7 +125,7 @@ HAKO_MODEL=your-model-id
 .\start-web.ps1 -Mode Fake
 ```
 
-Fake Worker 只用于确定性 UI 和协议测试，不能作为真实模型能力证据。Web 的 Session/Run、取消、迟到事件隔离和恢复语义见 [架构说明](docs/WEB_SESSION_RUN_ARCHITECTURE.md)。
+Fake Worker 只用于确定性 UI 和协议测试，不能作为真实模型能力证据。
 
 ## 完成判定
 
@@ -188,9 +187,3 @@ GitHub Actions 在 Windows 与 Ubuntu、Python 3.12 上运行 Python 核心测�
 - 当前工具串行执行；本地基线中 list/read 耗时不足总墙钟 0.1%，没有把未证明有收益的工具并发包装成卖点。
 - 已实现 Run 边界的确定性裁剪，避免多轮工具日志无限累积；已实现 Single-Run Context Compaction：模型请求前估算上下文预算，达到阈值后将较早的 Action、Tool Result 和执行轨迹压缩为结构化 Working Summary，同时保留原始 Goal、用户约束和最近消息。完整 Conversation 与 Event Log 不删除，Compaction 只改变下一轮提供给模型的工作视图。当前实现仍不能保证任意极端输入在一次压缩后必然低于 Provider hard limit。
 - 可选只读 subagent 的权限隔离和直接调用已测试，但真实标本中尚无稳定的模型自主采用收益，因此不列为核心卖点。
-
-## 相关文档
-
-- [Web API](docs/WEB_CONSOLE_API.md)：REST/SSE 协议
-- [Web 需求](docs/WEB_CONSOLE_REQUIREMENTS.md)：信息架构与产品语义
-- [Session/Run 架构](docs/WEB_SESSION_RUN_ARCHITECTURE.md)：会话、运行与事件生命周期
